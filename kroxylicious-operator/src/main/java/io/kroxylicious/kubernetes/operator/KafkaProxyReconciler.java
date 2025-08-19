@@ -26,12 +26,15 @@ import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.fabric8.kubernetes.api.model.GenericKubernetesResource;
 import io.fabric8.kubernetes.api.model.Volume;
 import io.fabric8.kubernetes.api.model.VolumeBuilder;
 import io.fabric8.kubernetes.api.model.VolumeMount;
 import io.fabric8.kubernetes.api.model.VolumeMountBuilder;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.apps.DeploymentStatus;
+import io.fabric8.kubernetes.client.ResourceNotFoundException;
+import io.fabric8.kubernetes.client.dsl.base.ResourceDefinitionContext;
 import io.javaoperatorsdk.operator.OperatorException;
 import io.javaoperatorsdk.operator.api.config.informer.InformerEventSourceConfiguration;
 import io.javaoperatorsdk.operator.api.reconciler.Context;
@@ -158,7 +161,7 @@ public class KafkaProxyReconciler implements
         boolean hasClusters = !model.clustersWithValidNetworking().isEmpty();
         ConfigurationFragment<Configuration> fragment = null;
         if (hasClusters) {
-            fragment = generateProxyConfig(model);
+            fragment = generateProxyConfig(model, context);
         }
         KafkaProxyContext.init(context,
                 new VirtualKafkaClusterStatusFactory(clock),
@@ -166,7 +169,7 @@ public class KafkaProxyReconciler implements
                 fragment);
     }
 
-    private ConfigurationFragment<Configuration> generateProxyConfig(ProxyModel model) {
+    private ConfigurationFragment<Configuration> generateProxyConfig(ProxyModel model, Context<KafkaProxy> context) {
 
         var allFilterDefinitions = buildFilterDefinitions(model);
         Map<String, ConfigurationFragment<NamedFilterDefinition>> namedDefinitions = allFilterDefinitions.stream()
@@ -174,7 +177,7 @@ public class KafkaProxyReconciler implements
                         cf -> cf.fragment().name(),
                         Function.identity()));
 
-        var virtualClusters = buildVirtualClusters(namedDefinitions.keySet(), model);
+        var virtualClusters = buildVirtualClusters(namedDefinitions.keySet(), model, context);
 
         List<NamedFilterDefinition> referencedFilters = virtualClusters.stream()
                 .flatMap(vcFragment -> Optional.ofNullable(vcFragment.fragment().filters()).stream().flatMap(Collection::stream))
@@ -203,11 +206,11 @@ public class KafkaProxyReconciler implements
                 allMounts);
     }
 
-    private static List<ConfigurationFragment<VirtualCluster>> buildVirtualClusters(Set<String> successfullyBuiltFilterNames, ProxyModel model) {
+    private static List<ConfigurationFragment<VirtualCluster>> buildVirtualClusters(Set<String> successfullyBuiltFilterNames, ProxyModel model, Context<KafkaProxy> context) {
         return model.clustersWithValidNetworking().stream()
                 .filter(cluster -> cluster.filterResolutionResults().stream().allMatch(
                         filterResult -> successfullyBuiltFilterNames.contains(filterDefinitionName(filterResult.reference()))))
-                .map(cluster -> buildVirtualCluster(cluster, model.networkingModel()))
+                .map(cluster -> buildVirtualCluster(cluster, model.networkingModel(), context))
                 .toList();
     }
 
@@ -241,7 +244,7 @@ public class KafkaProxyReconciler implements
         return cluster.filterResolutionResults().stream()
                 .map(ResolutionResult::referentResource)
                 .map(filterCr -> {
-                    String filterDefinitionName = filterDefinitionName(ResourcesUtil.toLocalRef(filterCr));
+                    String filterDefinitionName = filterDefinitionName(toLocalRef(filterCr));
                     var spec = filterCr.getSpec();
                     String type = spec.getType();
                     SecureConfigInterpolator.InterpolationResult interpolationResult = interpolateConfig(spec);
@@ -258,7 +261,7 @@ public class KafkaProxyReconciler implements
     }
 
     private static ConfigurationFragment<VirtualCluster> buildVirtualCluster(ClusterResolutionResult cluster,
-                                                                             ProxyNetworkingModel ingressModel) {
+                                                                             ProxyNetworkingModel ingressModel, Context<KafkaProxy> context) {
 
         ProxyNetworkingModel.ClusterNetworkingModel clusterNetworkingModel = ingressModel.clusterIngressModel(cluster.cluster()).orElseThrow();
         var gatewayFragments = ConfigurationFragment.reduce(clusterNetworkingModel.clusterIngressNetworkingModelResults().stream()
@@ -267,7 +270,7 @@ public class KafkaProxyReconciler implements
 
         KafkaService kafkaServiceRef = cluster.serviceResolutionResult().referentResource();
         var virtualClusterConfigurationFragment = gatewayFragments
-                .flatMap(clusterCfs -> buildTargetCluster(kafkaServiceRef).map(targetCluster -> new VirtualCluster(
+                .flatMap(clusterCfs -> buildTargetCluster(kafkaServiceRef, context).map(targetCluster -> new VirtualCluster(
                         name(cluster.cluster()),
                         targetCluster,
                         clusterCfs,
@@ -317,9 +320,35 @@ public class KafkaProxyReconciler implements
                                 buildProtocols(ingressTls.getProtocols()).orElse(null))));
     }
 
-    private static ConfigurationFragment<TargetCluster> buildTargetCluster(KafkaService kafkaServiceRef) {
+    private static ConfigurationFragment<TargetCluster> buildTargetCluster(KafkaService kafkaServiceRef, Context<KafkaProxy> context) {
         return buildTargetClusterTls(kafkaServiceRef)
-                .map(tls -> new TargetCluster(kafkaServiceRef.getSpec().getBootstrapServers(), tls));
+                .map(tls -> {
+                    var ref = kafkaServiceRef.getSpec().getRef();
+
+                    ResourceDefinitionContext resourceDefinitionContext = new ResourceDefinitionContext.Builder()
+                            .withGroup(ref.getGroup())
+                            .withVersion("v1")
+                            .withPlural("kafkas")
+                            .withNamespaced(true)
+                            .build();
+
+                    GenericKubernetesResource kafkaResource = context.getClient().genericKubernetesResources(resourceDefinitionContext).inNamespace(ref.getNamespace()).withName(ref.getName()).get();
+                    String bootstrapServers = "";
+                    if (kafkaResource != null && kafkaResource.getAdditionalProperties().containsKey("status")) {
+                        Map<String, Object> status = (Map<String, Object>) kafkaResource.getAdditionalProperties().get("status");
+                        if (status != null && status.containsKey("listeners")) {
+                            for (Map<String, Object> listener : (Iterable<Map<String, Object>>) status.get("listeners")) {
+                                if ("tls".equals(listener.get("type")) && listener.containsKey("bootstrapServers")) {
+                                    bootstrapServers = (String) listener.get("bootstrapServers");
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        throw new ResourceNotFoundException("Kafka cluster or status not found.");
+                    }
+                    return new TargetCluster(bootstrapServers, tls);
+                });
     }
 
     private static ConfigurationFragment<Optional<Tls>> buildTargetClusterTls(KafkaService kafkaServiceRef) {
@@ -493,13 +522,13 @@ public class KafkaProxyReconciler implements
         return kafkaService -> {
             // we do not want to trigger reconciliation of any proxy if the ingress has not been reconciled
             if (!ResourcesUtil.isStatusFresh(kafkaService)) {
-                LOGGER.debug("Ignoring event from KafkaService with stale status: {}", ResourcesUtil.toLocalRef(kafkaService));
+                LOGGER.debug("Ignoring event from KafkaService with stale status: {}", toLocalRef(kafkaService));
                 return Set.of();
             }
             // find all virtual clusters that reference this kafkaServiceRef
 
             Set<? extends LocalRef<KafkaProxy>> proxyRefs = ResourcesUtil.resourcesInSameNamespace(context, kafkaService, VirtualKafkaCluster.class)
-                    .filter(vkc -> vkc.getSpec().getTargetKafkaServiceRef().equals(ResourcesUtil.toLocalRef(kafkaService)))
+                    .filter(vkc -> vkc.getSpec().getTargetKafkaServiceRef().equals(toLocalRef(kafkaService)))
                     .map(VirtualKafkaCluster::getSpec)
                     .map(VirtualKafkaClusterSpec::getProxyRef)
                     .collect(Collectors.toSet());
@@ -573,7 +602,7 @@ public class KafkaProxyReconciler implements
         return cluster -> {
             // we do not want to trigger reconciliation of any proxy if the cluster has not been reconciled
             if (!ResourcesUtil.isStatusFresh(cluster)) {
-                LOGGER.debug("Ignoring event from cluster with stale status: {}", ResourcesUtil.toLocalRef(cluster));
+                LOGGER.debug("Ignoring event from cluster with stale status: {}", toLocalRef(cluster));
                 return Set.of();
             }
             // we need to reconcile all proxies when a virtual kafka cluster changes in case the proxyRef is updated, we need to update
@@ -589,7 +618,7 @@ public class KafkaProxyReconciler implements
         return ingress -> {
             // we do not want to trigger reconciliation of any proxy if the ingress has not been reconciled
             if (!ResourcesUtil.isStatusFresh(ingress)) {
-                LOGGER.debug("Ignoring event from ingress with stale status: {}", ResourcesUtil.toLocalRef(ingress));
+                LOGGER.debug("Ignoring event from ingress with stale status: {}", toLocalRef(ingress));
                 return Set.of();
             }
             // we need to reconcile all proxies when a kafka proxy ingress changes in case the proxyRef is updated, we need to update
@@ -615,7 +644,7 @@ public class KafkaProxyReconciler implements
         return (KafkaProtocolFilter filter) -> {
             // we do not want to trigger reconciliation of any proxy if the filter has not been reconciled
             if (!ResourcesUtil.isStatusFresh(filter)) {
-                LOGGER.debug("Ignoring event from filter with stale status: {}", ResourcesUtil.toLocalRef(filter));
+                LOGGER.debug("Ignoring event from filter with stale status: {}", toLocalRef(filter));
                 return Set.of();
             }
             // filters don't point to a proxy, but must be in the same namespace as the proxy/proxies which reference the,

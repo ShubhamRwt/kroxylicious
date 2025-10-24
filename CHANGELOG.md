@@ -6,9 +6,42 @@ For changes that effect a public API, the [deprecation policy](./DEV_GUIDE.md#de
 Format `<github issue/pr number>: <short description>`.
 
 ## SNAPSHOT
+
+* [#2754](https://github.com/kroxylicious/kroxylicious/issues/2754): Add support for OAUTHBEARER tokens into SaslInspectionFilter
+* [#2580](https://github.com/kroxylicious/kroxylicious/issues/2580): Add an Azure Key Vault KMS implementation for Record Encryption
+* [#2759](https://github.com/kroxylicious/kroxylicious/pull/2759): Remove kroxylicious-sample and document how to use io.kroxylicious:kroxylicious-filter-archetype
+* [#2671](https://github.com/kroxylicious/kroxylicious/pull/2671): SASL inspection filter supporting PLAIN, SCRAM-SHA-256 and SCRAM-SHA-512.
+* [#2681](https://github.com/kroxylicious/kroxylicious/pull/2681): Create a maven archetype for filter development io.kroxylicious:kroxylicious-filter-archetype
+* [#2778](https://github.com/kroxylicious/kroxylicious/pull/2778): The proxy now allocates a sessionId to connect client and server channels for logging purposes. Allowing users to track activity between downstream and upstream channels.
+* [#143](https://github.com/kroxylicious/kroxylicious/issues/143): Add support for Netty metrics
+* [#2809](https://github.com/kroxylicious/kroxylicious/pull/2809): Add optional configuration parameter to control the number of worker threads used by Netty.
+* [#1467](https://github.com/kroxylicious/kroxylicious/pull/1467): Migrate to Netty 4.2
+* [#2693](https://github.com/kroxylicious/kroxylicious/pull/2693): Kroxylicious operator can now discover plain bootstrap address from Strimzi Kafka custom resource 
+
+## 0.16.0
+
+* [#2710](https://github.com/kroxylicious/kroxylicious/pull/2710): bump org.apache.logging.log4j:log4j-bom from 2.25.1 to 2.25.2
+* [#2542](https://github.com/kroxylicious/kroxylicious/issues/2542): Add support for Kafka 4.1.0
+* [#2688](https://github.com/kroxylicious/kroxylicious/pull/2688): bump io.netty:netty-bom from 4.1.126.Final to 4.1.127.Final
+* [#2685](https://github.com/kroxylicious/kroxylicious/pull/2685): build(deps): bump kubernetes-client.version from 7.3.1 to 7.4.0
+* [#1927](https://github.com/kroxylicious/kroxylicious/issues/1927): chore(docs): Remove deprecated adminHttp configuration property.
+* [#1885](https://github.com/kroxylicious/kroxylicious/issues/1885): chore(docs): Remove deprecated support for virtualClusters expressed as a map.
+* [#2598](https://github.com/kroxylicious/kroxylicious/pull/2598): feat(metrics): Add metrics for the number of active connections
+
+### Changes, deprecations and removals
+
+* The `virtualClusters` configuration property now requires a list of `virtualCluster` objects.  The support
+  for supplying a virtual cluster map (which was deprecated at 0.11.0) is now removed.
+* Support for the `adminHttp` configuration property (which was deprecated in 0.11.0) is removed. Use `management` instead.
+  Also support for the `host` configuration property within that object (which was also deprecated in 0.11.0) is removed. Use `bindAddress` instead.
+* **breaking** kroxylicious-api change. `ListClientMetricsResourcesResponseFilter` and `ListClientMetricsResourcesRequestFilter` are removed, replaced
+  with `ListConfigResourcesResponseFilter` and `ListConfigResourcesRequestFilter` due to the RPC being renamed in kafka-clients. Filters that implement
+  the old interfaces will be incompatible with this version of the proxy and must migrate to the new interfaces.
+* The 'old' metrics that were deprecated at 0.13.0 are now removed. See the documentation for the details of the new metrics.
+
 ## 0.15.0
 
-* [#2585](https://github.com/kroxylicious/kroxylicious/pull/2585) feat(runtime): Optional configurable policy for selecting the upstream bootstrap server from the bootstrap servers list on connection to the proxies bootstrap address. Available options are `round-robin` (default) and `random`.
+* [#2585](https://github.com/kroxylicious/kroxylicious/pull/2585): feat(runtime): Optional configurable policy for selecting the upstream bootstrap server from the bootstrap servers list on connection to the proxies bootstrap address. Available options are `round-robin` (default) and `random`.
 * [#2402](https://github.com/kroxylicious/kroxylicious/issues/2402): feat(docs): Encryption-at-rest quickstart
 * [#2565](https://github.com/kroxylicious/kroxylicious/pull/2565): build(deps): bump io.javaoperatorsdk:operator-framework-bom from 5.0.4 to 5.1.2
 

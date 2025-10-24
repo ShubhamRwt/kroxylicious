@@ -8,6 +8,7 @@ package io.kroxylicious.proxy;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -19,6 +20,8 @@ import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import io.github.nettyplus.leakdetector.junit.NettyLeakDetectorExtension;
 
@@ -27,6 +30,7 @@ import io.kroxylicious.proxy.config.NamedFilterDefinitionBuilder;
 import io.kroxylicious.proxy.filter.OutOfBandSendFilterFactory;
 import io.kroxylicious.proxy.filter.RequestResponseMarkingFilter;
 import io.kroxylicious.proxy.filter.RequestResponseMarkingFilterFactory;
+import io.kroxylicious.proxy.testplugins.ShortCircuitErrorResponse;
 import io.kroxylicious.test.Request;
 import io.kroxylicious.test.Response;
 import io.kroxylicious.test.ResponsePayload;
@@ -39,6 +43,7 @@ import static io.kroxylicious.UnknownTaggedFields.unknownTaggedFieldsToStrings;
 import static io.kroxylicious.proxy.filter.RequestResponseMarkingFilter.FILTER_NAME_TAG;
 import static org.apache.kafka.common.protocol.ApiKeys.CREATE_TOPICS;
 import static org.apache.kafka.common.protocol.ApiKeys.DESCRIBE_CLUSTER;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -68,6 +73,27 @@ public class OutOfBandRequestIT {
             thenResponseContainsTagsAugmentedInByUpstreamFilterOnly(responseData);
             andMessageFromOutOfBandRequestToMockHadTagAddedByUpstreamFilterOnly(tester);
             tester.assertAllMockInteractionsInvoked();
+        }
+    }
+
+    @EnumSource(ShortCircuitErrorResponse.ResponseMechanism.class)
+    @ParameterizedTest
+    void shouldTolerateOutOfBandMessageWithShortCircuitResponse(ShortCircuitErrorResponse.ResponseMechanism responseMechanism) {
+        // 1. tag each DESCRIBE_CLUSTER request and response with filter name
+        NamedFilterDefinition downstreamFilter = addAddUnknownTaggedFieldToMessagesWithApiKey("downstreamOfOutOfBandFilter", DESCRIBE_CLUSTER);
+        // 2. send an out-of-band CREATE_TOPICS request
+        NamedFilterDefinition outOfBandSender = outOfBandSender(CREATE_TOPICS, FILTER_NAME_TAG);
+        // 3. short-circuit with a failure response to every request
+        String className = ShortCircuitErrorResponse.class.getName();
+        NamedFilterDefinition upstreamFilter = new NamedFilterDefinitionBuilder(className + "-" + "upstreamShortCircuit", className)
+                .withConfig("responseMechanism", responseMechanism).build();
+        try (var tester = createMockTesterWithFilters(downstreamFilter, outOfBandSender, upstreamFilter);
+                var client = tester.simpleTestClient()) {
+            DescribeClusterResponseData responseData = whenDescribeCluster(client);
+            assertThat(responseData.errorCode()).isEqualTo(Errors.UNKNOWN_SERVER_ERROR.code());
+            assertThat(unknownTaggedFieldsToStrings(responseData, FILTER_NAME_TAG)).containsExactly(
+                    RequestResponseMarkingFilter.class.getSimpleName() + "-%s-%s".formatted("downstreamOfOutOfBandFilter",
+                            RequestResponseMarkingFilterFactory.Direction.RESPONSE.toString().toLowerCase(Locale.ROOT)));
         }
     }
 

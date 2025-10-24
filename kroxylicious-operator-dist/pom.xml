@@ -13,7 +13,7 @@
     <parent>
         <groupId>io.kroxylicious</groupId>
         <artifactId>kroxylicious-parent</artifactId>
-        <version>0.16.0-SNAPSHOT</version>
+        <version>0.17.0-SNAPSHOT</version>
     </parent>
 
     <artifactId>kroxylicious-operator-dist</artifactId>
@@ -25,6 +25,12 @@
         <dependency>
             <groupId>io.kroxylicious</groupId>
             <artifactId>kroxylicious-operator</artifactId>
+            <version>${project.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.kroxylicious</groupId>
+            <artifactId>kroxylicious-docs</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>

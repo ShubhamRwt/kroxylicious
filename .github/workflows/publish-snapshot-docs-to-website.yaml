@@ -54,7 +54,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref_name }}
       
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -65,7 +65,7 @@ jobs:
         working-directory: kroxylicious
       
       - name: Build with Maven
-        run: mvn -Dquick -P dist package --non-recursive
+        run: mvn -Dquick -P dist package --pl kroxylicious-docs
         working-directory: kroxylicious
       
       - name: Checkout Website
@@ -76,12 +76,12 @@ jobs:
           ref: main
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
         with:
           driver-opts: network=host
 
       - name: Build Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
         with:
           context: kroxylicious.github.io
           push: true
@@ -96,7 +96,7 @@ jobs:
         working-directory: kroxylicious.github.io
 
       - name: copy built documentation into website
-        run: cp -r kroxylicious/target/web/* kroxylicious.github.io/
+        run: cp -r kroxylicious/kroxylicious-docs/target/web/* kroxylicious.github.io/
 
       - name: Build with Jekyll
         run: |
@@ -108,7 +108,7 @@ jobs:
             bash -c 'eval "$(rbenv init -)" && cp -r /css/_sass/bootstrap /site/_sass/ && bundle exec jekyll build --config=_config.yml,_config-baseurl.yml,_config-overrides.yml'
         working-directory: kroxylicious.github.io
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: kroxylicious.github.io/_site
           retention-days: 14

@@ -39,7 +39,6 @@ import io.kroxylicious.proxy.internal.filter.ApiVersionsIntersectFilter;
 import io.kroxylicious.proxy.internal.filter.BrokerAddressFilter;
 import io.kroxylicious.proxy.internal.filter.EagerMetadataLearner;
 import io.kroxylicious.proxy.internal.filter.NettyFilterContext;
-import io.kroxylicious.proxy.internal.metrics.DownstreamMessageCountingKafkaMessageListener;
 import io.kroxylicious.proxy.internal.metrics.MetricEmittingKafkaMessageListener;
 import io.kroxylicious.proxy.internal.net.Endpoint;
 import io.kroxylicious.proxy.internal.net.EndpointBinding;
@@ -89,7 +88,6 @@ public class KafkaProxyInitializer extends ChannelInitializer<Channel> {
 
     @Override
     public void initChannel(Channel ch) {
-
         LOGGER.trace("Connection from {} to my address {}", ch.remoteAddress(), ch.localAddress());
 
         if (tls) {
@@ -101,7 +99,6 @@ public class KafkaProxyInitializer extends ChannelInitializer<Channel> {
         addLoggingErrorHandler(ch.pipeline());
     }
 
-    @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
     private void initPlainChannel(Channel ch) {
         ch.pipeline().addLast("plainResolver", new ChannelInboundHandlerAdapter() {
             @Override
@@ -130,7 +127,7 @@ public class KafkaProxyInitializer extends ChannelInitializer<Channel> {
     }
 
     // deep inheritance tree of SniHandler not something we can fix
-    @SuppressWarnings({ "OptionalUsedAsFieldOrParameterType", "java:S110" })
+    @SuppressWarnings({ "java:S110" })
     private void initTlsChannel(Channel ch) {
         LOGGER.debug("Adding SSL/SNI handler");
         ch.pipeline().addLast("sniResolver", new SniHandler((sniHostname, promise) -> {
@@ -230,7 +227,8 @@ public class KafkaProxyInitializer extends ChannelInitializer<Channel> {
                 endpointReconciler,
                 new ApiVersionsIntersectFilter(apiVersionsService),
                 new ApiVersionsDowngradeFilter(apiVersionsService));
-        var frontendHandler = new KafkaProxyFrontendHandler(netFilter, dp, binding, virtualCluster.getClusterName());
+        ProxyChannelStateMachine proxyChannelStateMachine = new ProxyChannelStateMachine(virtualCluster.getClusterName(), binding.nodeId());
+        var frontendHandler = new KafkaProxyFrontendHandler(netFilter, dp, binding, proxyChannelStateMachine);
 
         pipeline.addLast("netHandler", frontendHandler);
         addLoggingErrorHandler(pipeline);
@@ -244,9 +242,7 @@ public class KafkaProxyInitializer extends ChannelInitializer<Channel> {
         var clientToProxyMessageCounterProvider = Metrics.clientToProxyMessageCounterProvider(clusterName, nodeId);
         var clientToProxyMessageSizeDistributionProvider = Metrics.clientToProxyMessageSizeDistributionProvider(clusterName, nodeId);
 
-        return KafkaMessageListener.chainOf(
-                new MetricEmittingKafkaMessageListener(clientToProxyMessageCounterProvider, clientToProxyMessageSizeDistributionProvider),
-                deprecatedMessageMetricHandler(clusterName));
+        return new MetricEmittingKafkaMessageListener(clientToProxyMessageCounterProvider, clientToProxyMessageSizeDistributionProvider);
     }
 
     private static MetricEmittingKafkaMessageListener buildMetricsMessageListenerForEncode(EndpointBinding binding, VirtualClusterModel virtualCluster) {
@@ -256,14 +252,6 @@ public class KafkaProxyInitializer extends ChannelInitializer<Channel> {
         var proxyToClientMessageSizeDistributionProvider = Metrics.proxyToClientMessageSizeDistributionProvider(clusterName, nodeId);
         return new MetricEmittingKafkaMessageListener(proxyToClientMessageCounterProvider,
                 proxyToClientMessageSizeDistributionProvider);
-    }
-
-    @SuppressWarnings("removal")
-    private KafkaMessageListener deprecatedMessageMetricHandler(String clusterName) {
-        return new DownstreamMessageCountingKafkaMessageListener(
-                Metrics.inboundDownstreamMessageCounter(clusterName),
-                Metrics.inboundDownstreamDecodedMessageCounter(clusterName),
-                Metrics.payloadSizeBytesUpstreamSummary(clusterName));
     }
 
     private static void addLoggingErrorHandler(ChannelPipeline pipeline) {

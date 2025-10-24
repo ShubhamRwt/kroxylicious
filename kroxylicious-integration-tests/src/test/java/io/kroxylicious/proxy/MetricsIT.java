@@ -7,6 +7,9 @@ package io.kroxylicious.proxy;
 
 import java.io.IOException;
 import java.net.Socket;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -111,6 +114,24 @@ class MetricsIT {
             var notFoundResp = ahc.getFromAdminEndpoint("nonexistent");
             assertThat(notFoundResp.statusCode())
                     .isEqualTo(HttpResponseStatus.NOT_FOUND.code());
+        }
+    }
+
+    @Test
+    void shouldDisallowPost(KafkaCluster cluster) throws Exception {
+        var config = configWithMetrics(cluster);
+
+        try (var tester = kroxyliciousTester(config);
+                var ignored = tester.getManagementClient()) {
+            var client = HttpClient.newHttpClient();
+            var post = HttpRequest.newBuilder()
+                    .uri(tester.getManagementClient().getUri().resolve("/metrics"))
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(new byte[1024]))
+                    .build();
+            var discarding = HttpResponse.BodyHandlers.discarding();
+            var methodNotAllowed = client.send(post, discarding);
+            assertThat(methodNotAllowed.statusCode())
+                    .isEqualTo(HttpResponseStatus.METHOD_NOT_ALLOWED.code());
         }
     }
 
@@ -776,125 +797,99 @@ class MetricsIT {
     }
 
     @Test
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    void shouldIncrementDownstreamMessagesOnProduceRequestWithoutFilter(KafkaCluster cluster, Topic topic) throws ExecutionException, InterruptedException {
+    void shouldTrackClientToProxyActiveConnections(KafkaCluster cluster, Topic topic) {
         var config = configWithMetrics(cluster);
 
-        // Given
-        try (var tester = kroxyliciousTester(config);
-                var managementClient = tester.getManagementClient();
-                var producer = tester.producer()) {
-            var metricList = managementClient.scrapeMetrics();
-            var inboundDownstreamMessagesMetricsValue = getSingleMetricsValue(metricList, "kroxylicious_inbound_downstream_messages_total");
-            var inboundDownstreamDecodedMessagesMetricsValue = getSingleMetricsValue(metricList, "kroxylicious_inbound_downstream_decoded_messages_total");
-
-            // When
-            producer.send(new ProducerRecord<>(topic.name(), "my-key", "hello-world")).get();
-
-            // Then
-            // updated metrics after some message were produced
-            var updatedMetricsList = managementClient.scrapeMetrics();
-            var updatedInboundDownstreamMessagesMetricsValue = getSingleMetricsValue(updatedMetricsList, "kroxylicious_inbound_downstream_messages_total");
-            var updatedInboundDownstreamDecodedMessagesMetricsValue = getSingleMetricsValue(updatedMetricsList, "kroxylicious_inbound_downstream_decoded_messages_total");
-            assertThat(updatedInboundDownstreamMessagesMetricsValue).isGreaterThan(inboundDownstreamMessagesMetricsValue);
-            assertThat(updatedInboundDownstreamDecodedMessagesMetricsValue).isGreaterThan(inboundDownstreamDecodedMessagesMetricsValue);
-        }
-    }
-
-    @Test
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    void shouldIncrementDownstreamMessagesOnProduceRequestWithFilter(KafkaCluster cluster, Topic topic) throws ExecutionException, InterruptedException {
-
-        // the downstream messages and decoded messages is not yet differentiated by ApiKey
-        final UUID configInstance = UUID.randomUUID();
-
-        NamedFilterDefinition namedFilterDefinition = new NamedFilterDefinitionBuilder("filter",
-                CreateTopicRequest.class.getName()).withConfig("configInstanceId", configInstance).build();
-
-        var config = addFilterToConfig(configWithMetrics(cluster), namedFilterDefinition);
-
-        // Given
-        try (var tester = kroxyliciousTester(config);
-                var managementClient = tester.getManagementClient();
-                var producer = tester.producer()) {
-            var metricList = managementClient.scrapeMetrics();
-            var inboundDownstreamMessagesMetricsValue = getSingleMetricsValue(metricList, "kroxylicious_inbound_downstream_messages_total");
-            var inboundDownstreamDecodedMessagesMetricsValue = getSingleMetricsValue(metricList, "kroxylicious_inbound_downstream_decoded_messages_total");
-
-            // When
-            producer.send(new ProducerRecord<>(topic.name(), "my-key", "hello-world")).get();
-
-            // Then
-            // updated metrics after some message were produced
-            var updatedMetricsList = managementClient.scrapeMetrics();
-            var updatedInboundDownstreamMessagesMetricsValue = getSingleMetricsValue(updatedMetricsList, "kroxylicious_inbound_downstream_messages_total");
-            var updatedInboundDownstreamDecodedMessagesMetricsValue = getSingleMetricsValue(updatedMetricsList, "kroxylicious_inbound_downstream_decoded_messages_total");
-            assertThat(updatedInboundDownstreamMessagesMetricsValue).isGreaterThan(inboundDownstreamMessagesMetricsValue);
-            assertThat(updatedInboundDownstreamDecodedMessagesMetricsValue).isGreaterThan(inboundDownstreamDecodedMessagesMetricsValue);
-        }
-    }
-
-    @Test
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    void shouldIncrementConnectionMetrics(KafkaCluster cluster, Topic topic) throws Exception {
-        var config = configWithMetrics(cluster);
-
-        // Given
         try (var tester = kroxyliciousTester(config);
                 var managementClient = tester.getManagementClient()) {
-            var metricsList = managementClient.scrapeMetrics();
-            assertMetricsDoesNotExist(metricsList, "kroxylicious_downstream_connections_total", null);
-            assertMetricsDoesNotExist(metricsList, "kroxylicious_upstream_connections_total", null);
 
-            // When
-            var producer = tester.producer();
-            producer.send(new ProducerRecord<>(topic.name(), "my-key", "hello-world")).get();
+            var initialMetrics = managementClient.scrapeMetrics();
+            assertThat(initialMetrics)
+                    .hasNoMetricMatching("kroxylicious_client_to_proxy_active_connections", Map.of(
+                            NODE_ID_LABEL, "bootstrap"));
 
-            // Then
-            // updated metrics after some message were produced
-            var updatedMetricsList = managementClient.scrapeMetrics();
-            assertMetricsWithValue(updatedMetricsList, "kroxylicious_downstream_connections_total", null);
-            assertMetricsWithValue(updatedMetricsList, "kroxylicious_upstream_connections_total", null);
+            try (var producer = tester.producer()) {
+                var future = producer.send(new ProducerRecord<>(topic.name(), "key", "value"));
+                assertThat(future).succeedsWithin(Duration.ofSeconds(5));
+
+                await().atMost(Duration.ofSeconds(10))
+                        .untilAsserted(() -> {
+                            var metrics = managementClient.scrapeMetrics();
+                            assertThat(metrics)
+                                    .withUniqueMetric("kroxylicious_client_to_proxy_active_connections", Map.of(
+                                            NODE_ID_LABEL, "bootstrap"))
+                                    .value()
+                                    .isGreaterThanOrEqualTo(1.0);
+                        });
+
+                var activeMetrics = managementClient.scrapeMetrics();
+                assertThat(activeMetrics)
+                        .withUniqueMetric("kroxylicious_client_to_proxy_active_connections", Map.of(
+                                NODE_ID_LABEL, "bootstrap"))
+                        .value()
+                        .isGreaterThanOrEqualTo(1.0);
+            }
+
+            await().atMost(Duration.ofSeconds(10))
+                    .untilAsserted(() -> {
+                        var finalMetrics = managementClient.scrapeMetrics();
+                        assertThat(finalMetrics)
+                                .withUniqueMetric("kroxylicious_client_to_proxy_active_connections", Map.of(
+                                        NODE_ID_LABEL, "bootstrap"))
+                                .value()
+                                .isEqualTo(0.0);
+                    });
         }
     }
 
     @Test
-    void shouldIncrementPayloadSizeBytesMetricsOnProduceRequest(KafkaCluster cluster, Topic topic) throws ExecutionException, InterruptedException {
+    void shouldTrackProxyToServerActiveConnections(KafkaCluster cluster, Topic topic) {
         var config = configWithMetrics(cluster);
 
-        // Given
         try (var tester = kroxyliciousTester(config);
-                var managementClient = tester.getManagementClient();
-                var producer = tester.producer();) {
-            var metricList = managementClient.scrapeMetrics();
-            assertMetricsDoesNotExist(metricList, "kroxylicious_payload_size_bytes_count", ApiKeys.PRODUCE);
-            assertMetricsDoesNotExist(metricList, "kroxylicious_payload_size_bytes_sum", ApiKeys.PRODUCE);
+                var managementClient = tester.getManagementClient()) {
 
-            // When
-            producer.send(new ProducerRecord<>(topic.name(), "my-key", "hello-world")).get();
-            producer.send(new ProducerRecord<>(topic.name(), "my-key", "hello-world")).get();
+            var initialMetrics = managementClient.scrapeMetrics();
+            assertThat(initialMetrics)
+                    .hasNoMetricMatching("kroxylicious_proxy_to_server_active_connections", Map.of(
+                            NODE_ID_LABEL, "bootstrap"));
 
-            // Then
-            // updated metrics after some message were produced
-            var updatedMetricList = managementClient.scrapeMetrics();
-            assertMetricsWithValue(updatedMetricList, "kroxylicious_payload_size_bytes_count", ApiKeys.PRODUCE);
-            assertMetricsWithValue(updatedMetricList, "kroxylicious_payload_size_bytes_sum", ApiKeys.PRODUCE);
+            try (var producer = tester.producer()) {
+                var future = producer.send(new ProducerRecord<>(topic.name(), "key", "value"));
+                assertThat(future).succeedsWithin(Duration.ofSeconds(5));
+
+                await().atMost(Duration.ofSeconds(10))
+                        .untilAsserted(() -> {
+                            var metrics = managementClient.scrapeMetrics();
+                            assertThat(metrics)
+                                    .withUniqueMetric("kroxylicious_proxy_to_server_active_connections", Map.of(
+                                            NODE_ID_LABEL, "bootstrap"))
+                                    .value()
+                                    .isGreaterThanOrEqualTo(1.0);
+                        });
+
+                var activeMetrics = managementClient.scrapeMetrics();
+                assertThat(activeMetrics)
+                        .withUniqueMetric("kroxylicious_proxy_to_server_active_connections", Map.of(
+                                NODE_ID_LABEL, "bootstrap"))
+                        .value()
+                        .isGreaterThanOrEqualTo(1.0);
+            }
+
+            await().atMost(Duration.ofSeconds(10))
+                    .untilAsserted(() -> {
+                        var finalMetrics = managementClient.scrapeMetrics();
+                        assertThat(finalMetrics)
+                                .withUniqueMetric("kroxylicious_proxy_to_server_active_connections", Map.of(
+                                        NODE_ID_LABEL, "bootstrap"))
+                                .value()
+                                .isEqualTo(0.0);
+                    });
         }
     }
 
     private int getNodeIdForPartition(List<TopicPartitionInfo> partitions, int partitionId) {
         return partitions.stream().filter(p -> p.partition() == partitionId).map(TopicPartitionInfo::leader).map(Node::id).findFirst().orElseThrow();
-    }
-
-    void assertMetricsDoesNotExist(List<SimpleMetric> metricList, String metricsName, ApiKeys apiKey) {
-        Assertions.assertThat(metricList)
-                .hasSizeGreaterThan(0)
-                .noneSatisfy(simpleMetric -> {
-                    assertThat(simpleMetric.name()).isEqualTo(metricsName);
-                    if (apiKey != null) {
-                        assertThat(simpleMetric.labels()).containsValue(apiKey.toString());
-                    }
-                });
     }
 
     void assertMetricsWithValue(List<SimpleMetric> metricList, String metricsName, ApiKeys apiKey) {
@@ -907,10 +902,6 @@ class MetricsIT {
                     }
                     assertThat(simpleMetric.value()).isGreaterThan(0);
                 });
-    }
-
-    private static double getSingleMetricsValue(List<SimpleMetric> metricList, String metricsName) {
-        return getSingleMetricsValue(metricList, metricsName, labels -> true);
     }
 
     private static double getSingleMetricsValue(List<SimpleMetric> metricList, String metricsName, Predicate<Map<String, String>> labelPredicate) {

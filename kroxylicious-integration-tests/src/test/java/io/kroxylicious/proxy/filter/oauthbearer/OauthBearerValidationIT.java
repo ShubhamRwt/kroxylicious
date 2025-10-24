@@ -5,124 +5,59 @@
  */
 package io.kroxylicious.proxy.filter.oauthbearer;
 
-import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Predicate;
 
-import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.clients.admin.Admin;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.KafkaFuture;
-import org.apache.kafka.common.config.SaslConfigs;
 import org.apache.kafka.common.errors.SaslAuthenticationException;
-import org.apache.kafka.common.security.auth.SecurityProtocol;
-import org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler;
+import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule;
-import org.apache.kafka.common.security.oauthbearer.OAuthBearerValidatorCallbackHandler;
+import org.apache.kafka.common.security.oauthbearer.internals.secured.VerificationKeyResolverFactory;
 import org.assertj.core.api.InstanceOfAssertFactory;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIf;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
-import org.junitpioneer.jupiter.RestoreSystemProperties;
-import org.testcontainers.DockerClientFactory;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.LogMessageWaitStrategy;
-import org.testcontainers.utility.DockerImageName;
 
-import io.github.nettyplus.leakdetector.junit.NettyLeakDetectorExtension;
-
+import io.kroxylicious.proxy.BaseOauthBearerIT;
 import io.kroxylicious.proxy.config.ConfigurationBuilder;
 import io.kroxylicious.proxy.config.NamedFilterDefinition;
 import io.kroxylicious.proxy.config.NamedFilterDefinitionBuilder;
+import io.kroxylicious.proxy.testplugins.ClientAuthAwareLawyer;
 import io.kroxylicious.proxy.testplugins.ClientAuthAwareLawyerFilter;
-import io.kroxylicious.proxy.testplugins.ClientTlsAwareLawyer;
 import io.kroxylicious.test.assertj.KafkaAssertions;
-import io.kroxylicious.test.tester.SimpleMetric;
+import io.kroxylicious.test.tester.SimpleMetricAssert;
 import io.kroxylicious.testing.kafka.api.KafkaCluster;
 import io.kroxylicious.testing.kafka.common.BrokerConfig;
 import io.kroxylicious.testing.kafka.common.SaslMechanism;
-import io.kroxylicious.testing.kafka.junit5ext.KafkaClusterExtension;
 import io.kroxylicious.testing.kafka.junit5ext.Topic;
 
-import edu.umd.cs.findbugs.annotations.NonNull;
-
+import static io.kroxylicious.proxy.internal.util.Metrics.API_KEY_LABEL;
+import static io.kroxylicious.proxy.internal.util.Metrics.NODE_ID_LABEL;
 import static io.kroxylicious.test.tester.KroxyliciousConfigUtils.proxy;
 import static io.kroxylicious.test.tester.KroxyliciousTesters.kroxyliciousTester;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.InstanceOfAssertFactories.DOUBLE;
 
 /**
  * Integration test for OauthBearerValidation filter that uses wires the filter and Kafka Cluster to the
  * same test OAuth server.  It uses metric observations taken at the proxy to verify that the filter
  * is correctly protecting the broker from bad tokens.
  */
-@ExtendWith(KafkaClusterExtension.class)
-@ExtendWith(NettyLeakDetectorExtension.class)
-@EnabledIf(value = "isDockerAvailable", disabledReason = "docker unavailable")
-@RestoreSystemProperties
-class OauthBearerValidationIT {
+class OauthBearerValidationIT extends BaseOauthBearerIT {
 
-    private static final DockerImageName DOCKER_IMAGE_NAME = DockerImageName.parse("ghcr.io/navikt/mock-oauth2-server:2.2.1");
-
-    private static final int OAUTH_SERVER_PORT = 28089;
-    private static final String JWKS_ENDPOINT_URL = "http://localhost:" + OAUTH_SERVER_PORT + "/default/jwks";
-    private static final URI OAUTH_ENDPOINT_URL = URI.create(JWKS_ENDPOINT_URL).resolve("/");
-    private static final URI TOKEN_ENDPOINT_URL = OAUTH_ENDPOINT_URL.resolve("default/token");
-    private static final String EXPECTED_AUDIENCE = "default";
-    private static final String BAD_TOKEN = "eyJraWQiOiJkZWZhdWx0IiwidHlwIjoiSldUIiwiYWxnIjoiUlMyNTYifQ."
-            + "eyJzdWIiOiJjbGllbnRJZElnbm9yZSIsImF1ZCI6ImRlZmF1bHQiLCJuYmYiOjE3MjA3MjIyOTAsImF6cCI6ImNsaWVudElkSWdub3JlIiwiaXNzIjoiaHR0cDovL2xvY2FsaG9zdDoyODA4OS9kZWZhdWx0IiwiZXhwIjoxNzIwNzI1ODkwLCJpYXQiOjE3MjA3MjIyOTAsImp0aSI6IjE0MGZjMmFhLWRjZmQtNDE1Mi05MWJmLWQyMDZiM2M1MzAxZiIsInRpZCI6ImRlZmF1bHQifQ."
-            + "I4LUI4Lp6XwUzD-UN2LDRfiNPCvhHDQJVH_LCE4gkuY5UxrRMJ8H3C9408zmjGPRChWmKU4aRIy8rtSPbfRmDLenoM91dr1mDy8B01TZohEOACnAxBSvsN73-cNUUvaRzZmMeUkGbmgEtGhqZ2d3MELe7bm0fEyuNRyM9fv-AahGm551hchMe3bzeYjbcBKuatKYoiHuPTX_HuNF4AAwI_vz_lYzHliKDmPRJwpsaMUaCtsfUKbSzpRPe6X2FWWkkgOLtCD-W14sp3r8z2KrHryH_ILz2MtPvIlvmkJE8U0CRaVyQ-6L2sL-iUdXoUGTHmV384X2R-cy5gKFhN3Ibg"; // notsecret
-    private static final String KROXYLICIOUS_PAYLOAD_SIZE_BYTES_COUNT_METRIC = "kroxylicious_payload_size_bytes_count";
-    private static final Predicate<SimpleMetric> UPSTREAM_SASL_HANDSHAKE_LABELS_PREDICATE = m -> m.name().equals(KROXYLICIOUS_PAYLOAD_SIZE_BYTES_COUNT_METRIC)
-            && m.labels().entrySet().containsAll(
-                    Map.of("ApiKey", "SASL_HANDSHAKE", "flowing", "upstream").entrySet());
-    private static final Predicate<SimpleMetric> DOWNSTREAM_SASL_AUTHENTICATE_PREDICATE = m -> m.name().equals(KROXYLICIOUS_PAYLOAD_SIZE_BYTES_COUNT_METRIC)
-            && m.labels().entrySet().containsAll(
-                    Map.of("ApiKey", "SASL_AUTHENTICATE", "flowing", "downstream").entrySet());
-    private static final String ALLOWED_SASL_OAUTHBEARER_URLS_CONFIG = "org.apache.kafka.sasl.oauthbearer.allowed.urls";
     @SaslMechanism(value = OAuthBearerLoginModule.OAUTHBEARER_MECHANISM)
+    @BrokerConfig(name = "listener.name.external.oauthbearer.sasl.server.callback.handler.class", value = "org.apache.kafka.common.security.oauthbearer.OAuthBearerValidatorCallbackHandler")
+    @BrokerConfig(name = "listener.name.external.sasl.oauthbearer.jwt.validator.class", value = "org.apache.kafka.common.security.oauthbearer.BrokerJwtValidator")
     @BrokerConfig(name = "listener.name.external.sasl.oauthbearer.jwks.endpoint.url", value = JWKS_ENDPOINT_URL)
     @BrokerConfig(name = "listener.name.external.sasl.oauthbearer.expected.audience", value = EXPECTED_AUDIENCE)
-    @BrokerConfig(name = "listener.name.external.oauthbearer.sasl.server.callback.handler.class", value = "org.apache.kafka.common.security.oauthbearer.OAuthBearerValidatorCallbackHandler")
-    KafkaCluster cluster;
-    private static OauthServerContainer oauthServer;
-
-    @BeforeAll
-    static void beforeAll() {
-        // Kafka 4.0 requires that the org.apache.kafka.sasl.oauthbearer.allowed.urls sys property is set in order to use Oauth Bearer.
-        // The Kafka Broker and Proxy requires that JWKS_ENDPOINT_URL is in the allow list.
-        // The Kafka Client requires that TOKEN_ENDPOINT_URL is in the allow list.
-        System.setProperty(ALLOWED_SASL_OAUTHBEARER_URLS_CONFIG, JWKS_ENDPOINT_URL + "," + TOKEN_ENDPOINT_URL);
-
-        oauthServer = new OauthServerContainer(OauthBearerValidationIT.DOCKER_IMAGE_NAME);
-        oauthServer.setWaitStrategy(new LogMessageWaitStrategy().withRegEx(".*started server on address.*"));
-        oauthServer.addFixedExposedPort(OAUTH_SERVER_PORT, OAUTH_SERVER_PORT);
-        oauthServer.withEnv("SERVER_PORT", OAUTH_SERVER_PORT + "");
-        oauthServer.withEnv("LOG_LEVEL", "DEBUG"); // required to for the startup message to be logged.
-        oauthServer.start();
-    }
-
-    @AfterAll
-    static void afterAll() {
-        if (oauthServer != null) {
-            oauthServer.close();
-        }
-    }
+    protected KafkaCluster cluster;
 
     @AfterEach
     void afterEach() throws Exception {
@@ -135,13 +70,13 @@ class OauthBearerValidationIT {
         // cache. This is impactful to the proxy because its config is constant (so cache hits).
         // The reason kafka broker doesn't suffer this itself is because the config is different between
         // clusters instances (port numbers, log dir etc. are different).
-        var cacheField = OAuthBearerValidatorCallbackHandler.class.getDeclaredField("VERIFICATION_KEY_RESOLVER_CACHE");
+        var cacheField = VerificationKeyResolverFactory.class.getDeclaredField("CACHE");
         cacheField.setAccessible(true);
         ((Map<?, ?>) cacheField.get(null)).clear();
     }
 
     @Test
-    void successfulAuthWithValidToken(Topic topic) {
+    void successfulAuthWithValidToken() {
         var config = getClientConfig(TOKEN_ENDPOINT_URL);
 
         try (var tester = kroxyliciousTester(getConfiguredProxyBuilder());
@@ -153,20 +88,37 @@ class OauthBearerValidationIT {
 
             var allMetrics = ahc.scrapeMetrics();
 
-            var saslHandshakeRequestsGoingUpCount = findFirstMetricMatching(allMetrics, UPSTREAM_SASL_HANDSHAKE_LABELS_PREDICATE);
-            var saslAuthenticationResponsesComingDown = findFirstMetricMatching(allMetrics, DOWNSTREAM_SASL_AUTHENTICATE_PREDICATE);
+            SimpleMetricAssert.assertThat(allMetrics)
+                    .withFailMessage("Expecting proxy to have seen at least one handshake request from the downstream")
+                    .withUniqueMetric("kroxylicious_client_to_proxy_request_total", Map.of(
+                            API_KEY_LABEL, ApiKeys.SASL_HANDSHAKE.name(),
+                            NODE_ID_LABEL, "bootstrap"))
+                    .value()
+                    .isEqualTo(1);
 
-            assertThat(saslHandshakeRequestsGoingUpCount)
-                    .isPresent()
-                    .get(DOUBLE)
-                    .withFailMessage("Expecting proxy to have seen at least two handshake requests (one for metadata, one for broker) from downstream")
-                    .isGreaterThanOrEqualTo(2);
+            SimpleMetricAssert.assertThat(allMetrics)
+                    .withFailMessage("Expecting proxy to have seen at least one handshake request to the upstream")
+                    .withUniqueMetric("kroxylicious_proxy_to_server_request_total", Map.of(
+                            API_KEY_LABEL, ApiKeys.SASL_HANDSHAKE.name(),
+                            NODE_ID_LABEL, "bootstrap"))
+                    .value()
+                    .isEqualTo(1);
 
-            assertThat(saslAuthenticationResponsesComingDown)
-                    .isPresent()
-                    .get(DOUBLE)
-                    .withFailMessage("Expecting proxy to have seen at the same number of authentication responses from the broker as were handshake requests")
-                    .isEqualTo(saslHandshakeRequestsGoingUpCount.get());
+            SimpleMetricAssert.assertThat(allMetrics)
+                    .withFailMessage("Expecting proxy to have seen at least one authenticate request from downstream")
+                    .withUniqueMetric("kroxylicious_client_to_proxy_request_total", Map.of(
+                            API_KEY_LABEL, ApiKeys.SASL_AUTHENTICATE.name(),
+                            NODE_ID_LABEL, "bootstrap"))
+                    .value()
+                    .isEqualTo(1);
+
+            SimpleMetricAssert.assertThat(allMetrics)
+                    .withFailMessage("Expecting proxy to have seen at least one authenticate request to the upstream")
+                    .withUniqueMetric("kroxylicious_proxy_to_server_request_total", Map.of(
+                            API_KEY_LABEL, ApiKeys.SASL_AUTHENTICATE.name(),
+                            NODE_ID_LABEL, "bootstrap"))
+                    .value()
+                    .isEqualTo(1);
         }
     }
 
@@ -192,14 +144,14 @@ class OauthBearerValidationIT {
                     .hasByteValueSatisfying(val -> assertThat(val).isEqualTo(ClientAuthAwareLawyerFilter.TRUE));
 
             recordHeaders.singleHeaderWithKey(ClientAuthAwareLawyerFilter.HEADER_KEY_CLIENT_SASL_AUTHORIZATION_ID)
-                    .hasValueEqualTo("clientIdIgnore");
+                    .hasValueEqualTo(CLIENT_ID);
         }
     }
 
     @Test
-    void authWithBadToken(@TempDir Path tempdir) throws Exception {
-        var badTokenFile = Files.createTempFile(tempdir, "badtoken", "b64");
-        Files.writeString(badTokenFile, BAD_TOKEN);
+    void authWithExpiredTokenIsNotForwardedToServer(@TempDir Path tempdir) throws Exception {
+        var badTokenFile = Files.createTempFile(tempdir, "expiredtoken", "b64");
+        Files.writeString(badTokenFile, LONG_SINCE_EXPIRED_TOKEN);
         var config = getClientConfig(badTokenFile.toUri());
 
         System.setProperty(ALLOWED_SASL_OAUTHBEARER_URLS_CONFIG, JWKS_ENDPOINT_URL + "," + badTokenFile.toUri());
@@ -216,25 +168,22 @@ class OauthBearerValidationIT {
 
             var allMetrics = ahc.scrapeMetrics();
 
-            var saslHandshakeRequestsGoingUpCount = findFirstMetricMatching(allMetrics, UPSTREAM_SASL_HANDSHAKE_LABELS_PREDICATE);
-            var saslAuthenticationResponsesComingDown = findFirstMetricMatching(allMetrics, DOWNSTREAM_SASL_AUTHENTICATE_PREDICATE);
+            SimpleMetricAssert.assertThat(allMetrics)
+                    .withFailMessage("Expecting proxy to have seen at least one handshake request from downstream")
+                    .withUniqueMetric("kroxylicious_client_to_proxy_request_total", Map.of(
+                            API_KEY_LABEL, ApiKeys.SASL_AUTHENTICATE.name(),
+                            NODE_ID_LABEL, "bootstrap"))
+                    .value()
+                    .isEqualTo(1);
 
-            assertThat(saslHandshakeRequestsGoingUpCount)
-                    .isPresent()
-                    .get(DOUBLE)
-                    .withFailMessage("Expecting proxy to have seen at least one handshake requests from downstream")
-                    .isPositive();
-
-            assertThat(saslAuthenticationResponsesComingDown).isNotPresent();
+            SimpleMetricAssert.assertThat(allMetrics)
+                    .withFailMessage("Expecting proxy to have seen no authenticate requests to the upstream")
+                    .filterByName("kroxylicious_proxy_to_server_request_total")
+                    .hasNoMetricMatching("kroxylicious_proxy_to_server_request_total", Map.of(
+                            API_KEY_LABEL, ApiKeys.SASL_AUTHENTICATE.name(),
+                            NODE_ID_LABEL, "bootstrap"));
         }
 
-    }
-
-    private Optional<Double> findFirstMetricMatching(List<SimpleMetric> all, Predicate<SimpleMetric> predicate) {
-        return all.stream()
-                .filter(predicate)
-                .findFirst()
-                .map(SimpleMetric::value);
     }
 
     private ConfigurationBuilder getConfiguredProxyBuilder() {
@@ -245,8 +194,8 @@ class OauthBearerValidationIT {
                         "expectedAudience", EXPECTED_AUDIENCE)
                 .build();
         NamedFilterDefinition lawyer = new NamedFilterDefinitionBuilder(
-                ClientTlsAwareLawyer.class.getName(),
-                ClientTlsAwareLawyer.class.getName())
+                ClientAuthAwareLawyer.class.getName(),
+                ClientAuthAwareLawyer.class.getName())
                 .build();
 
         return proxy(cluster)
@@ -260,54 +209,12 @@ class OauthBearerValidationIT {
                 .addToDefaultFilters(oauthValidationFilter.name(), lawyer.name());
     }
 
-    @NonNull
-    private Map<String, Object> getProducerConfig() {
-        Map<String, Object> clientConfig = getClientConfig(OauthBearerValidationIT.TOKEN_ENDPOINT_URL);
-        clientConfig.put(CommonClientConfigs.CLIENT_ID_CONFIG, "producer");
-        return clientConfig;
-    }
-
-    @NonNull
-    private Map<String, Object> getConsumerConfig() {
-        Map<String, Object> clientConfig = getClientConfig(OauthBearerValidationIT.TOKEN_ENDPOINT_URL);
-        clientConfig.put(CommonClientConfigs.CLIENT_ID_CONFIG, "consumer");
-        clientConfig.put(ConsumerConfig.GROUP_ID_CONFIG, "my-consumer-group");
-        clientConfig.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        return clientConfig;
-    }
-
-    private Map<String, Object> getClientConfig(URI tokenEndpointUrl) {
-        var oauthClientConfig = new HashMap<String, Object>();
-        oauthClientConfig.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, SecurityProtocol.SASL_PLAINTEXT.name());
-        oauthClientConfig.put(SaslConfigs.SASL_MECHANISM, OAuthBearerLoginModule.OAUTHBEARER_MECHANISM);
-        oauthClientConfig.put(SaslConfigs.SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL, tokenEndpointUrl.toString());
-        oauthClientConfig.put(SaslConfigs.SASL_LOGIN_CALLBACK_HANDLER_CLASS, OAuthBearerLoginCallbackHandler.class.getCanonicalName());
-        oauthClientConfig.put(SaslConfigs.SASL_JAAS_CONFIG,
-                "%s required clientId=\"clientIdIgnore\" clientSecret=\"clientSecretIgnore\";".formatted(OAuthBearerLoginModule.class.getName()));
-        return oauthClientConfig;
-    }
-
     /**
      * Pings the cluster in order to assert connectivity. We don't care about the result.
      * @param admin admin
      */
     private KafkaFuture<?> performClusterOperation(Admin admin) {
         return admin.describeCluster().nodes();
-    }
-
-    private static class OauthServerContainer extends GenericContainer<OauthServerContainer> {
-        private OauthServerContainer(DockerImageName dockerImageName) {
-            super(dockerImageName);
-        }
-
-        @Override
-        protected void addFixedExposedPort(int hostPort, int containerPort) {
-            super.addFixedExposedPort(hostPort, containerPort);
-        }
-    }
-
-    static boolean isDockerAvailable() {
-        return DockerClientFactory.instance().isDockerAvailable();
     }
 
 }

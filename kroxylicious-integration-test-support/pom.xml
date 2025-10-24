@@ -16,7 +16,7 @@
     <parent>
         <groupId>io.kroxylicious</groupId>
         <artifactId>kroxylicious-parent</artifactId>
-        <version>0.16.0-SNAPSHOT</version>
+        <version>0.17.0-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <artifactId>kroxylicious-integration-test-support</artifactId>
@@ -88,7 +88,7 @@
         </dependency>
         <dependency>
             <groupId>io.netty</groupId>
-            <artifactId>netty-codec</artifactId>
+            <artifactId>netty-codec-base</artifactId>
         </dependency>
         <dependency>
             <groupId>io.netty</groupId>
@@ -101,6 +101,10 @@
         <dependency>
             <groupId>io.netty</groupId>
             <artifactId>netty-transport-classes-kqueue</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport-classes-io_uring</artifactId>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
@@ -189,9 +193,22 @@
             <artifactId>mockito-junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.opentest4j</groupId>
+            <artifactId>opentest4j</artifactId>
+            <scope>compile</scope>
+        </dependency>
     </dependencies>
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <parameters>true</parameters>
+                    <proc>full</proc>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-dependency-plugin</artifactId>
@@ -212,15 +229,7 @@
                     </execution>
                     <execution>
                         <id>unpack-message-specs</id>
-                        <goals>
-                            <goal>unpack</goal>
-                        </goals>
                         <phase>generate-sources</phase>
-                        <configuration>
-                            <artifact>org.apache.kafka:kafka-clients:${kafka.version}</artifact>
-                            <includes>common/message/*.json</includes>
-                            <outputDirectory>${project.build.directory}/message-specs</outputDirectory>
-                        </configuration>
                     </execution>
                 </executions>
             </plugin>
@@ -272,6 +281,14 @@
                 <configuration>
                     <!-- disable for packages containing the sundrio generated classes -->
                     <excludePackageNames>io.kroxylicious.proxy.config:io.kroxylicious.proxy.config.admin</excludePackageNames>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>com.github.spotbugs</groupId>
+                <artifactId>spotbugs-maven-plugin</artifactId>
+                <configuration>
+                    <!-- Skipped to avoid failures from sundrio generated classes -->
+                    <skip>true</skip>
                 </configuration>
             </plugin>
         </plugins>

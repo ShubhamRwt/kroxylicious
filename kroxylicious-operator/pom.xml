@@ -13,7 +13,7 @@
     <parent>
         <groupId>io.kroxylicious</groupId>
         <artifactId>kroxylicious-parent</artifactId>
-        <version>0.16.0-SNAPSHOT</version>
+        <version>0.17.0-SNAPSHOT</version>
     </parent>
 
     <artifactId>kroxylicious-operator</artifactId>
@@ -21,8 +21,8 @@
     <description>An operator for running the Kroxylicious Proxy on Kubernetes</description>
 
     <properties>
-        <josdk.version>5.1.2</josdk.version>
-        <prometheus-metrics.version>1.3.10</prometheus-metrics.version>
+        <josdk.version>5.1.4</josdk.version>
+        <prometheus-metrics.version>1.4.1</prometheus-metrics.version>
         <io.kroxylicious.operator.image.name>quay.io/kroxylicious/operator:${project.version}</io.kroxylicious.operator.image.name>
         <io.kroxylicious.operator.image.archive>target/kroxylicious-operator.img.tar.gz</io.kroxylicious.operator.image.archive>
     </properties>
@@ -53,14 +53,6 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
-
-            <dependency>
-                <groupId>org.opentest4j</groupId>
-                <artifactId>opentest4j</artifactId>
-                <version>1.3.0</version>
-                <scope>test</scope>
-            </dependency>
-
         </dependencies>
     </dependencyManagement>
 
@@ -80,6 +72,13 @@
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>
+
+        <dependency>
+            <groupId>io.kroxylicious</groupId>
+            <artifactId>kroxylicious-integration-test-support</artifactId>
+            <scope>test</scope>
+        </dependency>
+
 
         <!-- third party dependencies - runtime and compile -->
         <dependency>
@@ -159,6 +158,11 @@
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-slf4j2-impl</artifactId>
             <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.strimzi</groupId>
+            <artifactId>api</artifactId>
+            <scope>compile</scope>
         </dependency>
         <dependency>
             <groupId>com.github.spotbugs</groupId>
@@ -275,17 +279,9 @@
             <artifactId>kubernetes-model-rbac</artifactId>
             <scope>test</scope>
         </dependency>
-        <dependency>
-            <groupId>org.opentest4j</groupId>
-            <artifactId>opentest4j</artifactId>
-        </dependency>
     </dependencies>
     <build>
         <plugins>
-            <plugin>
-                <groupId>com.github.spotbugs</groupId>
-                <artifactId>spotbugs-maven-plugin</artifactId>
-            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-failsafe-plugin</artifactId>
@@ -309,6 +305,7 @@
                          https://maven.apache.org/surefire/maven-surefire-plugin/faq.html#late-property-evaluation (required to propagate Jacoco args etc) -->
                     <argLine>
                         @{jacoco.argline}
+                        -javaagent:${org.mockito:mockito-core:jar}
                         --add-opens java.base/java.util=ALL-UNNAMED
                         --add-opens java.base/java.lang=ALL-UNNAMED
                     </argLine>

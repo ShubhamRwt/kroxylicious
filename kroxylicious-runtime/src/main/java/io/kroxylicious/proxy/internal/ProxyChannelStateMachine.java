@@ -8,6 +8,7 @@ package io.kroxylicious.proxy.internal;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.function.Function;
 
 import org.apache.kafka.common.errors.ApiException;
@@ -17,7 +18,6 @@ import org.apache.kafka.common.protocol.Errors;
 import org.slf4j.Logger;
 
 import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Timer;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.DecoderException;
@@ -30,8 +30,10 @@ import io.kroxylicious.proxy.frame.RequestFrame;
 import io.kroxylicious.proxy.internal.ProxyChannelState.Closed;
 import io.kroxylicious.proxy.internal.ProxyChannelState.Forwarding;
 import io.kroxylicious.proxy.internal.codec.FrameOversizedException;
+import io.kroxylicious.proxy.internal.util.ActivationToken;
 import io.kroxylicious.proxy.internal.util.Metrics;
 import io.kroxylicious.proxy.internal.util.StableKroxyliciousLinkGenerator;
+import io.kroxylicious.proxy.internal.util.VirtualClusterNode;
 import io.kroxylicious.proxy.model.VirtualClusterModel;
 import io.kroxylicious.proxy.service.HostPort;
 import io.kroxylicious.proxy.tag.VisibleForTesting;
@@ -39,13 +41,6 @@ import io.kroxylicious.proxy.tag.VisibleForTesting;
 import edu.umd.cs.findbugs.annotations.Nullable;
 
 import static io.kroxylicious.proxy.internal.ProxyChannelState.Startup.STARTING_STATE;
-import static io.kroxylicious.proxy.internal.util.Metrics.KROXYLICIOUS_DOWNSTREAM_CONNECTIONS;
-import static io.kroxylicious.proxy.internal.util.Metrics.KROXYLICIOUS_DOWNSTREAM_ERRORS;
-import static io.kroxylicious.proxy.internal.util.Metrics.KROXYLICIOUS_UPSTREAM_CONNECTIONS;
-import static io.kroxylicious.proxy.internal.util.Metrics.KROXYLICIOUS_UPSTREAM_CONNECTION_ATTEMPTS;
-import static io.kroxylicious.proxy.internal.util.Metrics.KROXYLICIOUS_UPSTREAM_CONNECTION_FAILURES;
-import static io.kroxylicious.proxy.internal.util.Metrics.KROXYLICIOUS_UPSTREAM_ERRORS;
-import static io.kroxylicious.proxy.internal.util.Metrics.taggedCounter;
 import static org.slf4j.LoggerFactory.getLogger;
 
 /**
@@ -107,44 +102,17 @@ import static org.slf4j.LoggerFactory.getLogger;
 public class ProxyChannelStateMachine {
     private static final String DUPLICATE_INITIATE_CONNECT_ERROR = "NetFilter called NetFilterContext.initiateConnect() more than once";
     private static final Logger LOGGER = getLogger(ProxyChannelStateMachine.class);
-    /**
-     * @deprecated use `clientToProxyConnectionCounter` instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    private final Counter downstreamConnectionsCounter;
-    /**
-     * @deprecated use `proxyToServerConnectionCounter` instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    private final Counter upstreamConnectionsCounter;
-    /**
-     * @deprecated use `clientToProxyErrorCounter` instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    private final Counter downstreamErrorCounter;
-    /**
-     * @deprecated use `proxyToServerErrorCounter` instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    private final Counter upstreamErrorCounter;
-    /**
-     * @deprecated use `proxyToServerConnectionCounter` instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    private final Counter connectionAttemptsCounter;
-    /**
-     * @deprecated use `proxyToServerConnectionCounter` instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    private final Counter upstreamConnectionFailureCounter;
 
-    // New connection metrics
+    // Connection metrics
     private final Counter clientToProxyErrorCounter;
     private final Counter clientToProxyConnectionCounter;
     private final Counter proxyToServerConnectionCounter;
     private final Counter proxyToServerErrorCounter;
     private final Timer serverToProxyBackpressureMeter;
     private final Timer clientToProxyBackPressureMeter;
+
+    private final ActivationToken clientToProxyConnectionToken;
+    private final ActivationToken proxyToServerConnectionToken;
 
     @VisibleForTesting
     @Nullable
@@ -154,24 +122,21 @@ public class ProxyChannelStateMachine {
     @Nullable
     Timer.Sample serverBackpressureTimer;
 
+    @Nullable
+    private String sessionId;
+
     @SuppressWarnings("java:S5738")
     public ProxyChannelStateMachine(String clusterName, @Nullable Integer nodeId) {
-        // New connection metrics
+        VirtualClusterNode node = new VirtualClusterNode(clusterName, nodeId);
+        // Connection metrics
         clientToProxyConnectionCounter = Metrics.clientToProxyConnectionCounter(clusterName, nodeId).withTags();
         clientToProxyErrorCounter = Metrics.clientToProxyErrorCounter(clusterName, nodeId).withTags();
         proxyToServerConnectionCounter = Metrics.proxyToServerConnectionCounter(clusterName, nodeId).withTags();
         proxyToServerErrorCounter = Metrics.proxyToServerErrorCounter(clusterName, nodeId).withTags();
         serverToProxyBackpressureMeter = Metrics.serverToProxyBackpressureTimer(clusterName, nodeId).withTags();
         clientToProxyBackPressureMeter = Metrics.clientToProxyBackpressureTimer(clusterName, nodeId).withTags();
-
-        // These connections metrics are deprecated and are replaced by the metrics mentioned above
-        List<Tag> tags = Metrics.tags(Metrics.DEPRECATED_VIRTUAL_CLUSTER_TAG, clusterName);
-        downstreamConnectionsCounter = taggedCounter(KROXYLICIOUS_DOWNSTREAM_CONNECTIONS, tags);
-        downstreamErrorCounter = taggedCounter(KROXYLICIOUS_DOWNSTREAM_ERRORS, tags);
-        upstreamConnectionsCounter = taggedCounter(KROXYLICIOUS_UPSTREAM_CONNECTIONS, tags);
-        connectionAttemptsCounter = taggedCounter(KROXYLICIOUS_UPSTREAM_CONNECTION_ATTEMPTS, tags);
-        upstreamErrorCounter = taggedCounter(KROXYLICIOUS_UPSTREAM_ERRORS, tags);
-        upstreamConnectionFailureCounter = taggedCounter(KROXYLICIOUS_UPSTREAM_CONNECTION_FAILURES, tags);
+        clientToProxyConnectionToken = Metrics.clientToProxyConnectionToken(node);
+        proxyToServerConnectionToken = Metrics.proxyToServerConnectionToken(node);
     }
 
     /**
@@ -292,11 +257,23 @@ public class ProxyChannelStateMachine {
     void onClientActive(KafkaProxyFrontendHandler frontendHandler) {
         if (STARTING_STATE.equals(this.state)) {
             this.frontendHandler = frontendHandler;
+            allocateSessionId(); // this is just keeping the tooling happy it should never be null at this point
+            LOGGER.atDebug()
+                    .setMessage("Allocated session ID: {} for downstream connection from {}:{}")
+                    .addArgument(sessionId)
+                    .addArgument(Objects.requireNonNull(this.frontendHandler).remoteHost())
+                    .addArgument(this.frontendHandler.remotePort())
+                    .log();
             toClientActive(STARTING_STATE.toClientActive(), frontendHandler);
         }
         else {
             illegalState("Client activation while not in the start state");
         }
+    }
+
+    @VisibleForTesting
+    void allocateSessionId() {
+        this.sessionId = UUID.randomUUID().toString();
     }
 
     /**
@@ -457,10 +434,6 @@ public class ProxyChannelStateMachine {
                 .setCause(LOGGER.isDebugEnabled() ? cause : null)
                 .addArgument(cause != null ? cause.getMessage() : "")
                 .log("Exception from the server channel: {}. Increase log level to DEBUG for stacktrace");
-        if (state instanceof ProxyChannelState.Connecting) {
-            upstreamConnectionFailureCounter.increment();
-        }
-        upstreamErrorCounter.increment();
         proxyToServerErrorCounter.increment();
         toClosed(cause);
     }
@@ -493,9 +466,15 @@ public class ProxyChannelStateMachine {
                     .log("Exception from the client channel: {}. Increase log level to DEBUG for stacktrace");
             errorCodeEx = Errors.UNKNOWN_SERVER_ERROR.exception();
         }
-        downstreamErrorCounter.increment();
         clientToProxyErrorCounter.increment();
         toClosed(errorCodeEx);
+    }
+
+    /**
+     * @return Return the session ID which connects a frontend channel with a backend channel
+     */
+    public String sessionId() {
+        return Objects.requireNonNull(sessionId);
     }
 
     @SuppressWarnings("java:S5738")
@@ -504,8 +483,8 @@ public class ProxyChannelStateMachine {
                                 KafkaProxyFrontendHandler frontendHandler) {
         setState(clientActive);
         frontendHandler.inClientActive();
-        downstreamConnectionsCounter.increment();
         clientToProxyConnectionCounter.increment();
+        clientToProxyConnectionToken.acquire();
     }
 
     @SuppressWarnings("java:S5738")
@@ -516,15 +495,21 @@ public class ProxyChannelStateMachine {
         setState(connecting);
         backendHandler = new KafkaProxyBackendHandler(this, virtualClusterModel);
         Objects.requireNonNull(frontendHandler).inConnecting(connecting.remote(), filters, backendHandler);
-        connectionAttemptsCounter.increment();
         proxyToServerConnectionCounter.increment();
+        LOGGER.atDebug()
+                .setMessage("{}: Upstream connection to {} established for client at {}:{}")
+                .addArgument(sessionId)
+                .addArgument(connecting.remote())
+                .addArgument(Objects.requireNonNull(this.frontendHandler).remoteHost())
+                .addArgument(this.frontendHandler.remotePort())
+                .log();
     }
 
     @SuppressWarnings("java:S5738")
     private void toForwarding(Forwarding forwarding) {
         setState(forwarding);
         Objects.requireNonNull(frontendHandler).inForwarding();
-        upstreamConnectionsCounter.increment();
+        proxyToServerConnectionToken.acquire();
     }
 
     /**
@@ -622,15 +607,18 @@ public class ProxyChannelStateMachine {
         if (state instanceof Closed) {
             return;
         }
+
         setState(new Closed());
         // Close the server connection
         if (backendHandler != null) {
             backendHandler.inClosed();
+            proxyToServerConnectionToken.release();
         }
 
         // Close the client connection with any error code
         if (frontendHandler != null) { // Can be null if the error happens before clientActive (unlikely but possible)
             frontendHandler.inClosed(errorCodeEx);
+            clientToProxyConnectionToken.release();
         }
     }
 

@@ -48,7 +48,6 @@ import io.kroxylicious.proxy.frame.DecodedResponseFrame;
 import io.kroxylicious.proxy.frame.OpaqueFrame;
 import io.kroxylicious.proxy.frame.OpaqueRequestFrame;
 import io.kroxylicious.proxy.frame.OpaqueResponseFrame;
-import io.kroxylicious.proxy.frame.RequestFrame;
 import io.kroxylicious.proxy.internal.filter.RequestFilterResultBuilderImpl;
 import io.kroxylicious.proxy.internal.filter.ResponseFilterResultBuilderImpl;
 import io.kroxylicious.proxy.internal.util.Assertions;
@@ -72,6 +71,7 @@ public class FilterHandler extends ChannelDuplexHandler {
     private final Channel inboundChannel;
     private final FilterAndInvoker filterAndInvoker;
     private final ClientSaslManager clientSaslManager;
+    private final ProxyChannelStateMachine proxyChannelStateMachine;
     private CompletableFuture<Void> writeFuture = CompletableFuture.completedFuture(null);
     private CompletableFuture<Void> readFuture = CompletableFuture.completedFuture(null);
     private @Nullable ChannelHandlerContext ctx;
@@ -82,13 +82,15 @@ public class FilterHandler extends ChannelDuplexHandler {
                          @Nullable String sniHostname,
                          VirtualClusterModel virtualClusterModel,
                          Channel inboundChannel,
-                         ClientSaslManager clientSaslManager) {
+                         ClientSaslManager clientSaslManager,
+                         ProxyChannelStateMachine proxyChannelStateMachine) {
         this.filterAndInvoker = Objects.requireNonNull(filterAndInvoker);
         this.timeoutMs = Assertions.requireStrictlyPositive(timeoutMs, "timeout");
         this.sniHostname = sniHostname;
         this.virtualClusterModel = virtualClusterModel;
         this.inboundChannel = inboundChannel;
         this.clientSaslManager = clientSaslManager;
+        this.proxyChannelStateMachine = proxyChannelStateMachine;
     }
 
     @Override
@@ -331,7 +333,7 @@ public class FilterHandler extends ChannelDuplexHandler {
         if (LOGGER.isWarnEnabled()) {
             var direction = decodedFrame.header() instanceof RequestHeaderData ? "request" : "response";
             LOGGER.atWarn().setMessage("{}: Filter '{}' for {} {} ended exceptionally - closing connection. Cause message {}")
-                    .addArgument(channelDescriptor())
+                    .addArgument(proxyChannelStateMachine.sessionId())
                     .addArgument(direction)
                     .addArgument(filterDescriptor())
                     .addArgument(decodedFrame.apiKey())
@@ -393,14 +395,13 @@ public class FilterHandler extends ChannelDuplexHandler {
         if (!name.endsWith("ResponseData")) {
             throw new AssertionError("Filter '" + filterDescriptor() + "': Attempt to use forwardResponse with a non-response: " + name);
         }
-        if (decodedFrame instanceof RequestFrame) {
+        if (decodedFrame instanceof DecodedRequestFrame<?> decodedRequestFrame) {
             if (message.apiKey() != decodedFrame.apiKeyId()) {
                 throw new AssertionError(
                         "Filter '" + filterDescriptor() + "': Attempt to respond with ApiMessage of type " + ApiKeys.forId(message.apiKey()) + " but request is of type "
                                 + decodedFrame.apiKey());
             }
-            DecodedResponseFrame<?> responseFrame = new DecodedResponseFrame<>(decodedFrame.apiVersion(), decodedFrame.correlationId(),
-                    header, message);
+            DecodedResponseFrame<?> responseFrame = decodedRequestFrame.responseFrame(header, message);
             decodedFrame.transferBuffersTo(responseFrame);
             if (LOGGER.isDebugEnabled()) {
                 LOGGER.debug("{}: Filter '{}' forwarding response: {}", channelDescriptor(), filterDescriptor(), msgDescriptor(decodedFrame));
@@ -481,6 +482,11 @@ public class FilterHandler extends ChannelDuplexHandler {
         }
 
         @Override
+        public String sessionId() {
+            return proxyChannelStateMachine.sessionId();
+        }
+
+        @Override
         public ByteBufferOutputStream createByteBufferOutputStream(int initialCapacity) {
             final ByteBuf buffer = ctx.alloc().ioBuffer(initialCapacity);
             decodedFrame.add(buffer);
@@ -508,7 +514,7 @@ public class FilterHandler extends ChannelDuplexHandler {
         public void clientSaslAuthenticationSuccess(String mechanism,
                                                     String authorizedId) {
             LOGGER.atInfo().setMessage("{}: Filter '{}' announces client has passed SASL authentication using mechanism '{}' and authorizationId '{}'.")
-                    .addArgument(channelDescriptor())
+                    .addArgument(sessionId())
                     .addArgument(filterDescriptor())
                     .addArgument(mechanism)
                     .addArgument(authorizedId)
@@ -525,7 +531,7 @@ public class FilterHandler extends ChannelDuplexHandler {
                     .setMessage("{}: Filter '{}' announces client has failed SASL authentication using mechanism '{}' and authorizationId '{}'. Cause message {}."
                             + (LOGGER.isDebugEnabled() ? "" : " Increase log level to DEBUG for stacktrace."))
                     .setCause(LOGGER.isDebugEnabled() ? exception : null)
-                    .addArgument(channelDescriptor())
+                    .addArgument(sessionId())
                     .addArgument(filterDescriptor())
                     .addArgument(mechanism)
                     .addArgument(authorizedId)

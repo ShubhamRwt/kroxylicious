@@ -10,6 +10,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
@@ -18,6 +20,11 @@ import io.micrometer.core.instrument.Meter.MeterProvider;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.binder.BaseUnits;
+import io.micrometer.core.instrument.binder.netty4.NettyAllocatorMetrics;
+import io.micrometer.core.instrument.binder.netty4.NettyEventExecutorMetrics;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.ByteBufAllocatorMetricProvider;
+import io.netty.channel.EventLoopGroup;
 
 import io.kroxylicious.proxy.VersionInfo;
 
@@ -35,16 +42,6 @@ public class Metrics {
     public static final String API_VERSION_LABEL = "api_version";
     public static final String DECODED_LABEL = "decoded";
 
-    public static final String DEPRECATED_API_KEY_TAG = "ApiKey";
-    public static final String DEPRECATED_API_VERSION_TAG = "ApiVersion";
-    public static final String DEPRECATED_FLOWING_TAG = "flowing";
-
-    public static final String DEPRECATED_VIRTUAL_CLUSTER_TAG = "virtualCluster";
-
-    public static final String DOWNSTREAM_FLOWING_VALUE = "downstream";
-
-    public static final String UPSTREAM_FLOWING_VALUE = "upstream";
-
     // Base Metric Names
 
     private static final String CLIENT_TO_PROXY_REQUEST_BASE_METER_NAME = "kroxylicious_client_to_proxy_request";
@@ -57,6 +54,8 @@ public class Metrics {
     private static final String PROXY_TO_SERVER_CONNECTION_BASE_METER_NAME = "kroxylicious_proxy_to_server_connections";
     private static final String KROXYLICIOUS_SERVER_TO_PROXY_READS_PAUSED_NAME = "kroxylicious_server_to_proxy_reads_paused";
     private static final String KROXYLICIOUS_CLIENT_TO_PROXY_READS_PAUSED_NAME = "kroxylicious_client_to_proxy_reads_paused";
+    private static final String CLIENT_TO_PROXY_ACTIVE_CONNECTION_BASE_METER_NAME = "kroxylicious_client_to_proxy_active_connections";
+    private static final String PROXY_TO_SERVER_ACTIVE_CONNECTION_BASE_METER_NAME = "kroxylicious_proxy_to_server_active_connections";
     private static final String SIZE_SUFFIX = "_size";
 
     /**
@@ -67,71 +66,16 @@ public class Metrics {
     private static final String INFO_METRIC_NAME = "kroxylicious_build.info";
 
     /**
-     * @deprecated use kroxylicious_client_to_proxy_request_count instead.
+     * Cache for tracking the number of active connections from clients to the proxy.
+     * This is used to provide metrics on the number of active connections per virtual cluster node.
      */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    @SuppressWarnings("java:S1133")
-    public static final String KROXYLICIOUS_INBOUND_DOWNSTREAM_MESSAGES = "kroxylicious_inbound_downstream_messages";
+    private static final ConcurrentHashMap<VirtualClusterNode, AtomicInteger> CLIENT_TO_PROXY_CONNECTION_CACHE = new ConcurrentHashMap<>();
 
     /**
-     * @deprecated use kroxylicious_client_to_proxy_request_count instead.
+     * Cache for tracking the number of active connections from the proxy to servers.
+     * This is used to provide metrics on the number of active connections per virtual cluster node.
      */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    @SuppressWarnings("java:S1133")
-    public static final String KROXYLICIOUS_INBOUND_DOWNSTREAM_DECODED_MESSAGES = "kroxylicious_inbound_downstream_decoded_messages";
-
-    private static final String KROXYLICIOUS_DOWNSTREAM = "kroxylicious_downstream_";
-
-    private static final String KROXYLICIOUS_UPSTREAM = "kroxylicious_upstream_";
-
-    /**
-     * @deprecated use {@link #clientToProxyMessageCounterProvider(String, Integer)} instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    @SuppressWarnings("java:S1133")
-    public static final String KROXYLICIOUS_DOWNSTREAM_CONNECTIONS = KROXYLICIOUS_DOWNSTREAM + "connections";
-
-    /**
-     * @deprecated use {@link #clientToProxyErrorCounter(String, Integer)} instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    @SuppressWarnings("java:S1133")
-    public static final String KROXYLICIOUS_DOWNSTREAM_ERRORS = KROXYLICIOUS_DOWNSTREAM + "errors";
-
-    /**
-     * @deprecated use {@link #proxyToServerConnectionCounter(String, Integer)} instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    @SuppressWarnings("java:S1133")
-    public static final String KROXYLICIOUS_UPSTREAM_CONNECTIONS = KROXYLICIOUS_UPSTREAM + "connections";
-
-    /**
-     * @deprecated use {@link #proxyToServerConnectionCounter(String, Integer)} instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    @SuppressWarnings("java:S1133")
-    public static final String KROXYLICIOUS_UPSTREAM_CONNECTION_ATTEMPTS = KROXYLICIOUS_UPSTREAM + "connection_attempts";
-
-    /**
-     * @deprecated use {@link #proxyToServerErrorCounter(String, Integer)} instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    @SuppressWarnings("java:S1133")
-    public static final String KROXYLICIOUS_UPSTREAM_CONNECTION_FAILURES = KROXYLICIOUS_UPSTREAM + "connection_failures";
-
-    /**
-     * @deprecated use {@link #proxyToServerErrorCounter(String, Integer)} instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    @SuppressWarnings("java:S1133")
-    public static final String KROXYLICIOUS_UPSTREAM_ERRORS = KROXYLICIOUS_UPSTREAM + "errors";
-
-    /**
-     * @deprecated use {@link #clientToProxyMessageSizeDistributionProvider(String, Integer)} instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    @SuppressWarnings("java:S1133")
-    public static final String KROXYLICIOUS_PAYLOAD_SIZE_BYTES = "kroxylicious_payload_size_bytes";
+    private static final ConcurrentHashMap<VirtualClusterNode, AtomicInteger> PROXY_TO_SERVER_CONNECTION_CACHE = new ConcurrentHashMap<>();
 
     private Metrics() {
         // unused
@@ -223,6 +167,42 @@ public class Metrics {
                 clusterName, nodeId);
     }
 
+    public static ActivationToken clientToProxyConnectionToken(VirtualClusterNode node) {
+        AtomicInteger currentCounter = clientToProxyConnectionCounter(node);
+        return new ActivationToken(currentCounter);
+    }
+
+    public static AtomicInteger clientToProxyConnectionCounter(VirtualClusterNode node) {
+        return CLIENT_TO_PROXY_CONNECTION_CACHE.computeIfAbsent(node, n -> {
+            AtomicInteger activeCount = new AtomicInteger();
+            Gauge.builder(CLIENT_TO_PROXY_ACTIVE_CONNECTION_BASE_METER_NAME, activeCount, AtomicInteger::get)
+                    .strongReference(true)
+                    .description("Number of currently active connections from the client to the proxy.")
+                    .tag(VIRTUAL_CLUSTER_LABEL, node.clusterName())
+                    .tag(NODE_ID_LABEL, nodeIdToLabelValue(node.nodeId()))
+                    .register(globalRegistry);
+            return activeCount;
+        });
+    }
+
+    public static ActivationToken proxyToServerConnectionToken(VirtualClusterNode node) {
+        AtomicInteger currentCounter = proxyToServerConnectionCounter(node);
+        return new ActivationToken(currentCounter);
+    }
+
+    public static AtomicInteger proxyToServerConnectionCounter(VirtualClusterNode node) {
+        return PROXY_TO_SERVER_CONNECTION_CACHE.computeIfAbsent(node, n -> {
+            AtomicInteger activeCount = new AtomicInteger();
+            Gauge.builder(PROXY_TO_SERVER_ACTIVE_CONNECTION_BASE_METER_NAME, activeCount, AtomicInteger::get)
+                    .strongReference(true)
+                    .description("Number of currently active connections from the proxy to the server.")
+                    .tag(VIRTUAL_CLUSTER_LABEL, node.clusterName())
+                    .tag(NODE_ID_LABEL, nodeIdToLabelValue(node.nodeId()))
+                    .register(globalRegistry);
+            return activeCount;
+        });
+    }
+
     public static Counter taggedCounter(String counterName, List<Tag> tags) {
         return counter(counterName, tags);
     }
@@ -296,59 +276,6 @@ public class Metrics {
     }
 
     /**
-     * @deprecated use {@link #clientToProxyConnectionCounter(String, Integer)} instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    @SuppressWarnings("java:S1133")
-    public static Counter inboundDownstreamDecodedMessageCounter(String clusterName) {
-        return Counter
-                .builder(KROXYLICIOUS_INBOUND_DOWNSTREAM_DECODED_MESSAGES)
-                .withRegistry(globalRegistry)
-                .withTags(DEPRECATED_VIRTUAL_CLUSTER_TAG, clusterName,
-                        DEPRECATED_FLOWING_TAG, DOWNSTREAM_FLOWING_VALUE);
-    }
-
-    /**
-     * @deprecated use {@link #clientToProxyConnectionCounter(String, Integer)} instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    @SuppressWarnings("java:S1133")
-    public static Counter inboundDownstreamMessageCounter(String clusterName) {
-        return Counter
-                .builder(KROXYLICIOUS_INBOUND_DOWNSTREAM_MESSAGES)
-                .withRegistry(globalRegistry)
-                .withTags(DEPRECATED_VIRTUAL_CLUSTER_TAG, clusterName,
-                        DEPRECATED_FLOWING_TAG, DOWNSTREAM_FLOWING_VALUE);
-
-    }
-
-    /**
-     * @deprecated use {@link #proxyToClientMessageSizeDistributionProvider(String, Integer)} instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    @SuppressWarnings("java:S1133")
-    public static MeterProvider<DistributionSummary> payloadSizeBytesUpstreamSummary(String clusterName) {
-        return DistributionSummary.builder(KROXYLICIOUS_PAYLOAD_SIZE_BYTES)
-                .baseUnit(BaseUnits.BYTES)
-                .tag(DEPRECATED_VIRTUAL_CLUSTER_TAG, clusterName)
-                .tag(DEPRECATED_FLOWING_TAG, UPSTREAM_FLOWING_VALUE)
-                .withRegistry(globalRegistry);
-    }
-
-    /**
-     * @deprecated use {@link #clientToProxyMessageSizeDistributionProvider(String, Integer)}  instead
-     */
-    @Deprecated(since = "0.13.0", forRemoval = true)
-    @SuppressWarnings("java:S1133")
-    public static MeterProvider<DistributionSummary> payloadSizeBytesDownstreamSummary(String clusterName) {
-        return DistributionSummary.builder(KROXYLICIOUS_PAYLOAD_SIZE_BYTES)
-                .baseUnit(BaseUnits.BYTES)
-                .tag(DEPRECATED_VIRTUAL_CLUSTER_TAG, clusterName)
-                .tag(DEPRECATED_FLOWING_TAG, DOWNSTREAM_FLOWING_VALUE)
-                .withRegistry(globalRegistry);
-    }
-
-    /**
      * Exposes a <a href="https://www.robustperception.io/exposing-the-software-version-to-prometheus/">build info metric</a> describing Kroxylicious version etc.
      *
      * @param versionInfo version info
@@ -360,5 +287,22 @@ public class Metrics {
                 .tag("commit_id", versionInfo.commitId())
                 .strongReference(true)
                 .register(globalRegistry);
+    }
+
+    public static void clear() {
+        CLIENT_TO_PROXY_CONNECTION_CACHE.clear();
+        PROXY_TO_SERVER_CONNECTION_CACHE.clear();
+    }
+
+    public static void bindNettyEventExecutorMetrics(final EventLoopGroup... eventLoopGroups) {
+        for (final var eventLoopGroup : eventLoopGroups) {
+            new NettyEventExecutorMetrics(eventLoopGroup).bindTo(globalRegistry);
+        }
+    }
+
+    public static void bindNettyAllocatorMetrics(final ByteBufAllocator alloc) {
+        if (alloc instanceof ByteBufAllocatorMetricProvider byteBufAllocatorMetricProvider) {
+            new NettyAllocatorMetrics(byteBufAllocatorMetricProvider).bindTo(globalRegistry);
+        }
     }
 }

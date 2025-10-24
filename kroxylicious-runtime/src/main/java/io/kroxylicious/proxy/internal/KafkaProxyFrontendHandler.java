@@ -28,6 +28,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelId;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPipeline;
@@ -50,13 +51,13 @@ import io.kroxylicious.proxy.internal.codec.KafkaMessageListener;
 import io.kroxylicious.proxy.internal.codec.KafkaRequestEncoder;
 import io.kroxylicious.proxy.internal.codec.KafkaResponseDecoder;
 import io.kroxylicious.proxy.internal.metrics.MetricEmittingKafkaMessageListener;
-import io.kroxylicious.proxy.internal.metrics.UpstreamPayloadSizeMetricRecordingKafkaMessageListener;
 import io.kroxylicious.proxy.internal.net.EndpointBinding;
 import io.kroxylicious.proxy.internal.util.Metrics;
 import io.kroxylicious.proxy.model.VirtualClusterModel;
 import io.kroxylicious.proxy.service.HostPort;
 import io.kroxylicious.proxy.tag.VisibleForTesting;
 
+import edu.umd.cs.findbugs.annotations.CheckReturnValue;
 import edu.umd.cs.findbugs.annotations.Nullable;
 
 import static io.kroxylicious.proxy.internal.ProxyChannelState.Connecting;
@@ -106,15 +107,6 @@ public class KafkaProxyFrontendHandler
         }
     }
 
-    KafkaProxyFrontendHandler(
-                              NetFilter netFilter,
-                              SaslDecodePredicate dp,
-                              EndpointBinding endpointBinding,
-                              String clusterName) {
-        this(netFilter, dp, endpointBinding, new ProxyChannelStateMachine(clusterName, endpointBinding.nodeId()));
-    }
-
-    @VisibleForTesting
     KafkaProxyFrontendHandler(
                               NetFilter netFilter,
                               SaslDecodePredicate dp,
@@ -331,13 +323,7 @@ public class KafkaProxyFrontendHandler
             return selectingServer.haProxyMessage().sourceAddress();
         }
         else {
-            SocketAddress socketAddress = clientCtx().channel().remoteAddress();
-            if (socketAddress instanceof InetSocketAddress inetSocketAddress) {
-                return inetSocketAddress.getAddress().getHostAddress();
-            }
-            else {
-                return String.valueOf(socketAddress);
-            }
+            return remoteHost();
         }
     }
 
@@ -355,13 +341,7 @@ public class KafkaProxyFrontendHandler
             return selectingServer.haProxyMessage().sourcePort();
         }
         else {
-            SocketAddress socketAddress = clientCtx().channel().remoteAddress();
-            if (socketAddress instanceof InetSocketAddress inetSocketAddress) {
-                return inetSocketAddress.getPort();
-            }
-            else {
-                return -1;
-            }
+            return remotePort();
         }
     }
 
@@ -408,6 +388,7 @@ public class KafkaProxyFrontendHandler
      * @throws IllegalStateException if {@link #proxyChannelStateMachine} is not {@link SelectingServer}.
      */
     @Override
+    @Nullable
     public String clientSoftwareName() {
         return proxyChannelStateMachine.enforceInSelectingServer(NET_FILTER_INVOKED_IN_WRONG_STATE).clientSoftwareName();
     }
@@ -419,6 +400,7 @@ public class KafkaProxyFrontendHandler
      * @throws IllegalStateException if {@link #proxyChannelStateMachine} is not {@link SelectingServer}.
      */
     @Override
+    @Nullable
     public String clientSoftwareVersion() {
         return proxyChannelStateMachine.enforceInSelectingServer(NET_FILTER_INVOKED_IN_WRONG_STATE).clientSoftwareVersion();
     }
@@ -430,6 +412,7 @@ public class KafkaProxyFrontendHandler
      * @throws IllegalStateException if {@link #proxyChannelStateMachine} is not {@link SelectingServer}.
      */
     @Override
+    @Nullable
     public String sniHostname() {
         proxyChannelStateMachine.enforceInSelectingServer(NET_FILTER_INVOKED_IN_WRONG_STATE);
         return sniHostname;
@@ -450,7 +433,7 @@ public class KafkaProxyFrontendHandler
                                 List<FilterAndInvoker> filters) {
         if (LOGGER.isDebugEnabled()) {
             LOGGER.debug("{}: Connecting to backend broker {} using filters {}",
-                    clientCtx().channel().id(), remote, filters);
+                    this.proxyChannelStateMachine.sessionId(), remote, filters);
         }
         this.proxyChannelStateMachine.onNetFilterInitiateConnect(remote, filters, virtualClusterModel, netFilter);
     }
@@ -466,7 +449,7 @@ public class KafkaProxyFrontendHandler
         // Start the upstream connection attempt.
         final Bootstrap bootstrap = configureBootstrap(backendHandler, inboundChannel);
 
-        LOGGER.trace("Connecting to outbound {}", remote);
+        LOGGER.debug("{}: Connecting to outbound {}", this.proxyChannelStateMachine.sessionId(), remote);
         ChannelFuture serverTcpConnectFuture = initConnection(remote.host(), remote.port(), bootstrap);
         Channel outboundChannel = serverTcpConnectFuture.channel();
         ChannelPipeline pipeline = outboundChannel.pipeline();
@@ -530,14 +513,7 @@ public class KafkaProxyFrontendHandler
 
         var serverToProxyMessageSizeDistributionProvider = Metrics.serverToProxyMessageSizeDistributionProvider(clusterName,
                 nodeId);
-        return KafkaMessageListener.chainOf(
-                new MetricEmittingKafkaMessageListener(serverToProxyMessageCounterProvider, serverToProxyMessageSizeDistributionProvider),
-                getDeprecatedUpstreamMessageMetrics(clusterName));
-    }
-
-    @SuppressWarnings("removal")
-    private KafkaMessageListener getDeprecatedUpstreamMessageMetrics(String clusterName) {
-        return new UpstreamPayloadSizeMetricRecordingKafkaMessageListener(Metrics.payloadSizeBytesDownstreamSummary(clusterName));
+        return new MetricEmittingKafkaMessageListener(serverToProxyMessageCounterProvider, serverToProxyMessageSizeDistributionProvider);
     }
 
     /** Ugly hack used for testing */
@@ -572,7 +548,7 @@ public class KafkaProxyFrontendHandler
 
         if (pendingReadComplete) {
             pendingReadComplete = false;
-            channelReadComplete(this.clientCtx);
+            channelReadComplete(Objects.requireNonNull(this.clientCtx));
         }
 
         if (isClientBlocked) {
@@ -660,7 +636,8 @@ public class KafkaProxyFrontendHandler
                             sniHostname,
                             virtualClusterModel,
                             inboundChannel,
-                            clientSaslManager));
+                            clientSaslManager,
+                            proxyChannelStateMachine));
         }
     }
 
@@ -701,4 +678,36 @@ public class KafkaProxyFrontendHandler
         }
         return errorResponse;
     }
+
+    /**
+     * Get the ID of the frontend channel if available.
+     * @return <code>null</code> if the channel is not yet available
+     */
+    @CheckReturnValue
+    @Nullable
+    public ChannelId channelId() {
+        Channel channel = this.clientCtx != null ? this.clientCtx.channel() : null;
+        return channel != null ? channel.id() : null;
+    }
+
+    protected String remoteHost() {
+        SocketAddress socketAddress = clientCtx().channel().remoteAddress();
+        if (socketAddress instanceof InetSocketAddress inetSocketAddress) {
+            return inetSocketAddress.getAddress().getHostAddress();
+        }
+        else {
+            return String.valueOf(socketAddress);
+        }
+    }
+
+    protected int remotePort() {
+        SocketAddress socketAddress = clientCtx().channel().remoteAddress();
+        if (socketAddress instanceof InetSocketAddress inetSocketAddress) {
+            return inetSocketAddress.getPort();
+        }
+        else {
+            return -1;
+        }
+    }
+
 }

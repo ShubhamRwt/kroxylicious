@@ -30,8 +30,8 @@ import io.github.nettyplus.leakdetector.junit.NettyLeakDetectorExtension;
 
 import io.kroxylicious.proxy.config.NamedFilterDefinition;
 import io.kroxylicious.proxy.config.NamedFilterDefinitionBuilder;
+import io.kroxylicious.proxy.testplugins.ClientAuthAwareLawyer;
 import io.kroxylicious.proxy.testplugins.ClientAuthAwareLawyerFilter;
-import io.kroxylicious.proxy.testplugins.ClientTlsAwareLawyer;
 import io.kroxylicious.proxy.testplugins.SaslPlainTermination;
 import io.kroxylicious.test.assertj.KafkaAssertions;
 import io.kroxylicious.testing.kafka.api.KafkaCluster;
@@ -49,7 +49,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 @ExtendWith(KafkaClusterExtension.class)
 @ExtendWith(NettyLeakDetectorExtension.class)
-public class SaslPlainTerminatorIT extends BaseIT {
+class SaslPlainTerminatorIT extends BaseIT {
 
     private static void doAThing(KafkaCluster cluster,
                                  Topic topic,
@@ -74,10 +74,11 @@ public class SaslPlainTerminatorIT extends BaseIT {
         NamedFilterDefinition saslTermination = new NamedFilterDefinitionBuilder(
                 SaslPlainTermination.class.getName(),
                 SaslPlainTermination.class.getName())
+                .withConfig("userNameToPassword", Map.of("alice", "alice-secret"))
                 .build();
         NamedFilterDefinition lawyer = new NamedFilterDefinitionBuilder(
-                ClientTlsAwareLawyer.class.getName(),
-                ClientTlsAwareLawyer.class.getName())
+                ClientAuthAwareLawyer.class.getName(),
+                ClientAuthAwareLawyer.class.getName())
                 .build();
         var config = proxy(cluster)
                 .addToFilterDefinitions(saslTermination, lawyer)

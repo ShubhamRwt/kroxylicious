@@ -103,7 +103,7 @@ RELEASE_TAG="v${RELEASE_VERSION}"
 WEBSITE_TMP=$(mktemp -d)
 
 # Use a `/.` at the end of the source path to avoid the source path being appended to the destination path if the `.../_files/` folder already exists
-KROXYLICIOUS_DOCS_LOCATION="${ORIGINAL_WORKING_DIR}/target/web"
+KROXYLICIOUS_DOCS_LOCATION="${ORIGINAL_WORKING_DIR}/kroxylicious-docs/target/web"
 WEBSITE_DOCS_LOCATION="${WEBSITE_TMP}/"
 
 if [[ "${DRY_RUN:-false}" == true ]]; then
@@ -122,7 +122,7 @@ echo "Checking out tags/${RELEASE_TAG} in  in $(git remote get-url "${REPOSITORY
 git checkout "tags/${RELEASE_TAG}"
 
 # Run docs build
-mvn -Dquick -P dist clean package --non-recursive
+mvn -P dist package --pl kroxylicious-docs
 
 # Move to temp directory so we don't end up with website files in the main repository
 cd "${WEBSITE_TMP}"

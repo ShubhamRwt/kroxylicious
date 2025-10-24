@@ -34,12 +34,14 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentMatchers;
+import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.DefaultChannelId;
 import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.haproxy.HAProxyCommand;
 import io.netty.handler.codec.haproxy.HAProxyMessage;
@@ -55,6 +57,7 @@ import io.kroxylicious.proxy.frame.DecodedResponseFrame;
 import io.kroxylicious.proxy.internal.ProxyChannelState.ApiVersions;
 import io.kroxylicious.proxy.internal.ProxyChannelState.SelectingServer;
 import io.kroxylicious.proxy.internal.codec.FrameOversizedException;
+import io.kroxylicious.proxy.internal.util.VirtualClusterNode;
 import io.kroxylicious.proxy.model.VirtualClusterModel;
 import io.kroxylicious.proxy.service.HostPort;
 
@@ -71,6 +74,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -81,11 +85,13 @@ class ProxyChannelStateMachineTest {
             "1.1.1.1", "2.2.2.2", 46421, 9092);
     private static final Offset<Double> CLOSE_ENOUGH = Offset.offset(0.00005);
     private static final String CLUSTER_NAME = "virtualClusterA";
+    private static final VirtualClusterNode VIRTUAL_CLUSTER_NODE = new VirtualClusterNode(CLUSTER_NAME, null);
     private static final VirtualClusterModel VIRTUAL_CLUSTER_MODEL = new VirtualClusterModel(CLUSTER_NAME, new TargetCluster("", Optional.empty()), false, false,
             List.of());
     private final RuntimeException failure = new RuntimeException("There's Klingons on the starboard bow");
     private ProxyChannelStateMachine proxyChannelStateMachine;
     private KafkaProxyBackendHandler backendHandler;
+    @Mock(strictness = Mock.Strictness.LENIENT)
     private KafkaProxyFrontendHandler frontendHandler;
     private SimpleMeterRegistry simpleMeterRegistry;
 
@@ -93,9 +99,9 @@ class ProxyChannelStateMachineTest {
     void setUp() {
         proxyChannelStateMachine = new ProxyChannelStateMachine(CLUSTER_NAME, null);
         backendHandler = mock(KafkaProxyBackendHandler.class);
-        frontendHandler = mock(KafkaProxyFrontendHandler.class);
         simpleMeterRegistry = new SimpleMeterRegistry();
         Metrics.globalRegistry.add(simpleMeterRegistry);
+        when(frontendHandler.channelId()).thenReturn(DefaultChannelId.newInstance());
     }
 
     @AfterEach
@@ -107,14 +113,14 @@ class ProxyChannelStateMachineTest {
     }
 
     @Test
-    void shouldCountClientConnections() {
+    void shouldCountClientToProxyConnections() {
         // Given
 
         // When
         proxyChannelStateMachine.onClientActive(frontendHandler);
 
         // Then
-        assertThat(Metrics.globalRegistry.get("kroxylicious_downstream_connections").counter())
+        assertThat(Metrics.globalRegistry.get("kroxylicious_client_to_proxy_connections").counter())
                 .isNotNull()
                 .satisfies(counter -> assertThat(counter.getId()).isNotNull())
                 .satisfies(counter -> assertThat(counter.count())
@@ -123,7 +129,7 @@ class ProxyChannelStateMachineTest {
 
     @ParameterizedTest
     @MethodSource("clientErrorStates")
-    void shouldCountClientExceptions(Runnable givenState, Boolean tlsEnabled) {
+    void shouldCountClientToProxyExceptions(Runnable givenState, Boolean tlsEnabled) {
         // Given
         givenState.run();
 
@@ -131,7 +137,7 @@ class ProxyChannelStateMachineTest {
         proxyChannelStateMachine.onClientException(failure, tlsEnabled);
 
         // Then
-        assertThat(Metrics.globalRegistry.get("kroxylicious_downstream_errors").counter())
+        assertThat(Metrics.globalRegistry.get("kroxylicious_client_to_proxy_errors").counter())
                 .isNotNull()
                 .satisfies(counter -> assertThat(counter.getId()).isNotNull())
                 .satisfies(counter -> assertThat(counter.count())
@@ -140,7 +146,7 @@ class ProxyChannelStateMachineTest {
 
     @ParameterizedTest
     @MethodSource("givenStates")
-    void shouldCountServerExceptions(Runnable givenState) {
+    void shouldCountProxyToServerExceptions(Runnable givenState) {
         // Given
         givenState.run();
 
@@ -148,7 +154,7 @@ class ProxyChannelStateMachineTest {
         proxyChannelStateMachine.onServerException(failure);
 
         // Then
-        assertThat(Metrics.globalRegistry.get("kroxylicious_upstream_errors").counter())
+        assertThat(Metrics.globalRegistry.get("kroxylicious_proxy_to_server_errors").counter())
                 .isNotNull()
                 .satisfies(counter -> assertThat(counter.getId()).isNotNull())
                 .satisfies(counter -> assertThat(counter.count())
@@ -156,23 +162,7 @@ class ProxyChannelStateMachineTest {
     }
 
     @Test
-    void shouldCountSuccessfulUpstreamConnections() {
-        // Given
-        stateMachineInConnecting();
-
-        // When
-        proxyChannelStateMachine.onServerActive();
-
-        // Then
-        assertThat(Metrics.globalRegistry.get("kroxylicious_upstream_connections").counter())
-                .isNotNull()
-                .satisfies(counter -> assertThat(counter.getId()).isNotNull())
-                .satisfies(counter -> assertThat(counter.count())
-                        .isCloseTo(1.0, CLOSE_ENOUGH));
-    }
-
-    @Test
-    void shouldCountUpstreamConnectionsAttempts() {
+    void shouldCountProxyToServerConnections() {
         // Given
         stateMachineInSelectingServer();
 
@@ -180,7 +170,7 @@ class ProxyChannelStateMachineTest {
         proxyChannelStateMachine.onNetFilterInitiateConnect(HostPort.parse("localhost:9090"), List.of(), VIRTUAL_CLUSTER_MODEL, null);
 
         // Then
-        assertThat(Metrics.globalRegistry.get("kroxylicious_upstream_connection_attempts").counter())
+        assertThat(Metrics.globalRegistry.get("kroxylicious_proxy_to_server_connections").counter())
                 .isNotNull()
                 .satisfies(counter -> assertThat(counter.getId()).isNotNull())
                 .satisfies(counter -> assertThat(counter.count())
@@ -188,7 +178,7 @@ class ProxyChannelStateMachineTest {
     }
 
     @Test
-    void shouldCountUpstreamConnectionsFailures() {
+    void shouldCountProxyToServerConnectionsFailures() {
         // Given
         stateMachineInConnecting();
 
@@ -196,7 +186,7 @@ class ProxyChannelStateMachineTest {
         proxyChannelStateMachine.onServerException(failure);
 
         // Then
-        assertThat(Metrics.globalRegistry.get("kroxylicious_upstream_connection_failures").counter())
+        assertThat(Metrics.globalRegistry.get("kroxylicious_proxy_to_server_errors").counter())
                 .isNotNull()
                 .satisfies(counter -> assertThat(counter.getId()).isNotNull())
                 .satisfies(counter -> assertThat(counter.count())
@@ -907,5 +897,131 @@ class ProxyChannelStateMachineTest {
                 0,
                 new ResponseHeaderData(),
                 new MetadataResponseData());
+    }
+
+    @Test
+    void shouldIncrementClientToProxyActiveConnectionsOnClientActive() {
+        // Given
+        int initialCount = getVirtualNodeClientToProxyActiveConnections();
+
+        // When
+        proxyChannelStateMachine.onClientActive(frontendHandler);
+
+        // Then
+        assertThat(getVirtualNodeClientToProxyActiveConnections())
+                .isEqualTo(initialCount + 1);
+    }
+
+    @Test
+    void shouldIncrementProxyToServerActiveConnectionsOnForwarding() {
+        // Given
+        stateMachineInConnecting();
+        int initialCount = getVirtualNodeProxyToServerActiveConnections();
+
+        // When
+        proxyChannelStateMachine.onServerActive();
+
+        // Then
+        assertThat(getVirtualNodeProxyToServerActiveConnections())
+                .isEqualTo(initialCount + 1);
+    }
+
+    @Test
+    void shouldDecrementActiveConnectionsOnClosed() {
+        // Given - establish both client and server connections
+        proxyChannelStateMachine.onClientActive(frontendHandler);
+        stateMachineInConnecting();
+        proxyChannelStateMachine.onServerActive();
+
+        int initialClientCount = getVirtualNodeClientToProxyActiveConnections();
+        int initialServerCount = getVirtualNodeProxyToServerActiveConnections();
+
+        // When
+        proxyChannelStateMachine.onClientInactive();
+
+        // Then
+        assertThat(getVirtualNodeClientToProxyActiveConnections())
+                .isEqualTo(initialClientCount - 1);
+        assertThat(getVirtualNodeProxyToServerActiveConnections())
+                .isEqualTo(initialServerCount - 1);
+    }
+
+    @Test
+    void shouldDecrementActiveConnectionsOnServerInactive() {
+        // Given - establish both client and server connections
+        proxyChannelStateMachine.onClientActive(frontendHandler);
+        stateMachineInConnecting();
+        proxyChannelStateMachine.onServerActive();
+
+        int initialClientCount = getVirtualNodeClientToProxyActiveConnections();
+        int initialServerCount = getVirtualNodeProxyToServerActiveConnections();
+
+        // When
+        proxyChannelStateMachine.onServerInactive();
+
+        // Then
+        assertThat(getVirtualNodeClientToProxyActiveConnections())
+                .isEqualTo(initialClientCount - 1);
+        assertThat(getVirtualNodeProxyToServerActiveConnections())
+                .isEqualTo(initialServerCount - 1);
+    }
+
+    @Test
+    void shouldDecrementActiveConnectionsOnClientException() {
+        // Given - establish client connection
+        proxyChannelStateMachine.onClientActive(frontendHandler);
+        int initialClientCount = getVirtualNodeClientToProxyActiveConnections();
+
+        // When
+        proxyChannelStateMachine.onClientException(new RuntimeException("test exception"), false);
+
+        // Then
+        assertThat(getVirtualNodeClientToProxyActiveConnections())
+                .isEqualTo(initialClientCount - 1);
+    }
+
+    @Test
+    void shouldDecrementActiveConnectionsOnServerException() {
+        // Given - establish both client and server connections
+        proxyChannelStateMachine.onClientActive(frontendHandler);
+        stateMachineInConnecting();
+        proxyChannelStateMachine.onServerActive();
+
+        int initialClientCount = getVirtualNodeClientToProxyActiveConnections();
+        int initialServerCount = getVirtualNodeProxyToServerActiveConnections();
+
+        // When
+        proxyChannelStateMachine.onServerException(new RuntimeException("test exception"));
+
+        // Then
+        assertThat(getVirtualNodeClientToProxyActiveConnections())
+                .isEqualTo(initialClientCount - 1);
+        assertThat(getVirtualNodeProxyToServerActiveConnections())
+                .isEqualTo(initialServerCount - 1);
+    }
+
+    @Test
+    void shouldOnlyDecrementClientConnectionsWhenNotInForwardingState() {
+        // Given - establish client connection but not server connection
+        proxyChannelStateMachine.onClientActive(frontendHandler);
+        int initialClientCount = getVirtualNodeClientToProxyActiveConnections();
+        int initialServerCount = getVirtualNodeProxyToServerActiveConnections();
+
+        // When - close while not in forwarding state
+        proxyChannelStateMachine.onClientInactive();
+
+        // Then - only client connections decremented
+        assertThat(getVirtualNodeClientToProxyActiveConnections())
+                .isEqualTo(initialClientCount - 1);
+        assertThat(getVirtualNodeProxyToServerActiveConnections())
+                .isEqualTo(initialServerCount); // unchanged
+    }
+
+    private int getVirtualNodeClientToProxyActiveConnections() {
+        return io.kroxylicious.proxy.internal.util.Metrics.clientToProxyConnectionCounter(VIRTUAL_CLUSTER_NODE).get();
+    }
+
+    private int getVirtualNodeProxyToServerActiveConnections() {
+        return io.kroxylicious.proxy.internal.util.Metrics.proxyToServerConnectionCounter(VIRTUAL_CLUSTER_NODE).get();
     }
 }

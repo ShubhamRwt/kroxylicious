@@ -6,11 +6,10 @@
 **/*.ipr
 docs
 etc
-kubernetes-examples
 !etc/eclipse-formatter-config.xml
 scripts
 Dockerfile
 .dockerignore
 .github
 README.md
-release-manifest.yaml
+kroxylicious-docs/release-manifest.yaml
